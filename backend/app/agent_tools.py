@@ -41,8 +41,19 @@ TOOL_REGISTRY: dict[str, ToolDefinition] = {
     for definition in [
         ToolDefinition("parse_menu", _object_schema({"text": _string}), _object_schema({"items": {"type": "array", "items": _object_schema({"name": _string, "category": _string, "allergens": _array, "halal": _string})}}), False, False, False, "Extract menu drafts; a person must confirm dietary declarations."),
         ToolDefinition("build_event_card", _object_schema({"event_id": _string}), _object_schema({"event_id": _string, "menu_count": {"type": "integer"}}), False, False, False, "Attach confirmed event context to the rescue job."),
+        ToolDefinition("send_heads_up", _object_schema({"event_id": _string, "size_class": _string}), _object_schema({"sent": _bool, "request_id": _string}), True, True, False, "Send a non-binding simulated standby request."),
+        ToolDefinition("cancel_heads_up", _object_schema({"event_id": _string, "reason": _string}), _object_schema({"cancelled": _bool}), True, True, False, "Withdraw a non-binding standby request."),
+        ToolDefinition("send_reminder", _object_schema({"event_id": _string}), _object_schema({"sent": _bool}), True, True, False, "Record a simulated reminder to confirm end-of-service surplus."),
+        ToolDefinition("confirm_end_of_service", _object_schema({"outcome": _string}), _object_schema({"recorded": _bool}), False, False, True, "Record the chef's end-of-service outcome."),
         ToolDefinition("analyze_leftover_photo", _object_schema({"menu_names": _array, "photo_name": _string}), _object_schema({"observations": {"type": "array"}, "unmatched": _array}), False, False, False, "Match photo observations against only this event's menu."),
         ToolDefinition("compare_to_menu", _object_schema({"menu_names": _array, "detected_names": _array}), _object_schema({"matched": _array, "unmatched": _array, "not_seen": _array}), False, False, False, "Apply closed-set menu matching."),
+        ToolDefinition("compare_to_plan", _object_schema({"size_class": _string, "actual_weight_kg": _number}), _object_schema({"comparison": _string}), False, False, False, "Compare confirmed surplus to a non-binding estimate without inventing size thresholds."),
+        ToolDefinition("classify_variance", _object_schema({"variance_types": _array}), _object_schema({"variance_types": _array}), False, False, False, "Record explicit variance signals for reconciliation."),
+        ToolDefinition("check_vehicle_fit", _object_schema({"weight_kg": _number, "capacity_kg": _number}), _object_schema({"fit": _string}), False, False, False, "Check vehicle fit only when a configured capacity is available."),
+        ToolDefinition("update_request_quantity", _object_schema({"request_id": _string, "actual_weight_kg": _number}), _object_schema({"updated": _bool}), True, True, False, "Update the simulated request using chef-confirmed quantity."),
+        ToolDefinition("shift_pickup_window", _object_schema({"delay_minutes": {"type": "integer"}}), _object_schema({"shifted": _bool}), True, True, False, "Record an explicitly requested pickup-window shift."),
+        ToolDefinition("release_slot", _object_schema({"event_id": _string}), _object_schema({"released": _bool}), True, True, False, "Release a standby slot when no surplus remains."),
+        ToolDefinition("request_adhoc_slot", _object_schema({"event_id": _string, "items": _array}), _object_schema({"request_id": _string}), True, True, False, "Ask the simulated Food Bank to decide an unscheduled request."),
         ToolDefinition("get_weather", _object_schema({"latitude": _number, "longitude": _number}), _object_schema({
             "available": _bool,
             "temperature_c": _number,
@@ -67,6 +78,8 @@ TOOL_REGISTRY: dict[str, ToolDefinition] = {
         ToolDefinition("submit_food_bank_request", _object_schema({"items": _array, "untouched_confirmed": _bool}), _object_schema({"request_id": _string}), True, True, True, "Create a simulated Food Bank request."),
         ToolDefinition("seal_audit_record", _object_schema({"batch_id": _string}), _object_schema({"sealed": _bool}), True, True, False, "Seal the append-only audit outcome."),
         ToolDefinition("calculate_impact", _object_schema({"weight_kg": _number, "co2e_factor": _number}), _object_schema({"meals_estimate": _number, "co2e_estimate": _number}), False, False, False, "Calculate labelled estimates using stated factors."),
+        ToolDefinition("generate_labels", _object_schema({"batch_id": _string, "items": _array}), _object_schema({"generated": _bool}), True, False, False, "Generate demo batch labels from confirmed item data."),
+        ToolDefinition("assign_batch", _object_schema({"batch_id": _string}), _object_schema({"assigned": _bool}), False, False, False, "Assign a batch identifier to confirmed surplus."),
     ]
 }
 
@@ -82,11 +95,19 @@ def policy_gate(
     untouched_confirmed: bool,
     confirmed_items: list[str],
     remaining_minutes: float,
+    handling_history_confirmed: bool = False,
 ) -> None:
     if name in {"send_offer", "submit_food_bank_request"}:
         proposed_items = inputs.get("confirmed_items", inputs.get("items", []))
         if not untouched_confirmed:
             raise PolicyBlocked("Untouched status was not confirmed.")
+        if not handling_history_confirmed:
+            raise PolicyBlocked("Food handling and temperature history is unknown.")
+        unsafe_items = set(inputs.get("guest_return_items", []))
+        unsafe_items.update(inputs.get("partly_served_items", []))
+        unsafe_items.update(inputs.get("uncertain_items", []))
+        if unsafe_items.intersection(proposed_items):
+            raise PolicyBlocked("Guest-returned, partly served, or uncertain food cannot be offered to people.")
         if not proposed_items or any(item not in confirmed_items for item in proposed_items):
             raise PolicyBlocked("Offer includes an item that is not confirmed on this event menu.")
         pickup_eta = float(inputs.get("pickup_eta_minutes", 20))
@@ -320,12 +341,39 @@ def execute_tool(name: str, inputs: dict[str, Any], context: dict[str, Any]) -> 
         return {"items": items, "model": model_info}
     if name == "build_event_card":
         return {"event_id": event.get("id", ""), "menu_count": len(menu_items)}
+    if name == "send_heads_up":
+        token = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()[:10]
+        return {"sent": True, "request_id": f"SIM-{token}", "simulated": True}
+    if name == "cancel_heads_up":
+        return {"cancelled": True, "simulated": True}
+    if name == "send_reminder":
+        return {"sent": True, "simulated": True}
+    if name == "confirm_end_of_service":
+        return {"recorded": True, "outcome": inputs.get("outcome", "")}
     if name == "analyze_leftover_photo":
         return context.get("analysis", {"observations": [], "unmatched": []})
     if name == "compare_to_menu":
         menu_names = inputs.get("menu_names", [])
         detected = inputs.get("detected_names", [])
         return {"matched": [name for name in detected if name in menu_names], "unmatched": [name for name in detected if name not in menu_names], "not_seen": [name for name in menu_names if name not in detected]}
+    if name == "compare_to_plan":
+        return {
+            "comparison": "Actual quantity is confirmed by the kitchen; size-class thresholds are unset."
+        }
+    if name == "classify_variance":
+        return {"variance_types": inputs.get("variance_types", [])}
+    if name == "check_vehicle_fit":
+        capacity = inputs.get("capacity_kg")
+        return {"fit": "unknown" if capacity is None else "fits" if inputs.get("weight_kg", 0) <= capacity else "does_not_fit"}
+    if name == "update_request_quantity":
+        return {"updated": True, "simulated": True}
+    if name == "shift_pickup_window":
+        return {"shifted": True, "simulated": True}
+    if name == "release_slot":
+        return {"released": True, "simulated": True}
+    if name == "request_adhoc_slot":
+        token = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()[:10]
+        return {"request_id": f"SIM-{token}", "simulated": True}
     if name == "get_weather":
         lat, lon = inputs.get("latitude", 25.2048), inputs.get("longitude", 55.2708)
         url = (
@@ -383,4 +431,8 @@ def execute_tool(name: str, inputs: dict[str, Any], context: dict[str, Any]) -> 
     if name == "calculate_impact":
         weight = float(inputs.get("weight_kg", 0))
         return {"meals_estimate": round(weight / 0.4), "co2e_estimate": round(weight * float(inputs.get("co2e_factor", 2.5)), 2)}
+    if name == "generate_labels":
+        return {"generated": True, "batch_id": inputs.get("batch_id", ""), "simulated": False}
+    if name == "assign_batch":
+        return {"assigned": True, "batch_id": inputs.get("batch_id", "")}
     raise ValueError(f"No implementation registered for tool: {name}")

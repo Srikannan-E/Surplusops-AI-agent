@@ -110,32 +110,20 @@ export const foodBankConfig: PortalConfig = {
   ],
 }
 
-export const coldStorageConfig: PortalConfig = {
-  id: 'public-cold-storage',
-  name: 'Public Cold Storage',
-  category: 'Community cold-storage capacity',
-  eyebrow: 'Community infrastructure simulation / 02',
-  description: 'Request mock chilled, frozen, or ambient capacity at a seeded community facility.',
-  notice: 'This is a local simulation, not an official public directory. Facility capacity and availability are illustrative only.',
-  submitLabel: 'Submit simulated storage request',
+export const charityConfig: PortalConfig = {
+  id: 'registered-charity',
+  name: 'Registered charity',
+  category: 'Food rescue fallback',
+  eyebrow: 'Registered charity simulation / 02',
+  description: 'Review a simulated fallback offer for confirmed, untouched event surplus.',
+  notice: 'This is a local simulation. It does not contact a real charity.',
+  submitLabel: 'Submit simulated charity response',
   fields: [
     { name: 'batch_id', label: 'Rescue batch ID', type: 'text', required: true, defaultValue: 'DEMO-BATCH-001' },
     { name: 'item_summary', label: 'Food / item description', type: 'textarea', required: true, defaultValue: 'Sealed banquet trays of vegetable biryani', full: true },
     { name: 'estimated_weight_kg', label: 'Estimated weight (kg)', type: 'number', required: true, min: 0.1, step: 0.1, defaultValue: 24 },
-    {
-      name: 'storage_type',
-      label: 'Storage requirement',
-      type: 'select',
-      required: true,
-      defaultValue: 'chilled',
-      options: [
-        { label: 'Chilled', value: 'chilled' },
-        { label: 'Frozen', value: 'frozen' },
-        { label: 'Ambient', value: 'ambient' },
-      ],
-    },
-    { name: 'facility_name', label: 'Facility name', type: 'text', required: true, defaultValue: 'Community Cold Store 01' },
-    { name: 'facility_location', label: 'Facility location', type: 'text', required: true, defaultValue: 'Al Quoz, Dubai' },
+    { name: 'charity_name', label: 'Charity name', type: 'text', required: true, defaultValue: 'Registered charity (simulated)' },
+    { name: 'pickup_location', label: 'Pickup location', type: 'text', required: true, defaultValue: 'Demo Hotel Dubai' },
     { name: 'required_until', label: 'Storage required until', type: 'text', required: true, defaultValue: localDateTime(12) },
     {
       name: 'simulated_response',

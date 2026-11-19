@@ -2,7 +2,7 @@ export type ServiceId =
   | 'reloop'
   | 'collecteroo'
   | 'uae-food-bank'
-  | 'public-cold-storage'
+  | 'registered-charity'
   | 'ne-ma-style-report'
 
 export type PortalRecord = {
@@ -51,11 +51,11 @@ export type DemoSession = {
   safety_buffer_minutes: number
   food_bank_response: 'accept' | 'decline'
   food_bank_decline_reason: string
-  cold_storage_response: 'accept' | 'decline'
-  cold_storage_decline_reason: string
+  charity_response: 'accept' | 'decline'
+  charity_decline_reason: string
   pickup_location: string
   food_bank_location: string
-  cold_storage_location: string
+  charity_location: string
   collection_deadline: string
   intake_confirmed: boolean
   intake_confirmed_at: string
@@ -86,6 +86,23 @@ export type DemoJob = {
   event_id?: string
   event_name: string
   status: string
+  outcome?: string
+  end_of_service_outcome?: 'nothing_left' | 'some_left' | 'not_sure' | ''
+  donation_intent?: {
+    status: 'standby' | 'confirmed' | 'cancelled_no_surplus'
+    size_class: 'none_likely' | 'small' | 'medium' | 'large' | null
+    is_estimate: boolean
+  }
+  heads_up_sent?: boolean
+  slot_acknowledged?: boolean
+  slot_released?: boolean
+  reconcile?: {
+    variance_types: string[]
+    actual_weight_kg: number | null
+    unsafe_items: string[]
+    delay_minutes: number
+    per_dish_acceptance: Record<string, boolean>
+  }
   venue_name: string
   dishes: string[]
   food_summary: string
@@ -100,9 +117,9 @@ export type DemoJob = {
   clock_anchor: string
   current_tier: number
   rungs: Record<'1' | '2' | '3' | '4', JobRung>
-  scenario: 'happy_path' | 'decline_then_recover' | 'nobody_accepts'
+  scenario: 'bigger_expected' | 'nothing_left' | 'nobody_accepts' | 'happy_path' | 'decline_then_recover'
   food_bank_response: 'accept' | 'decline'
-  longer_life_response: 'accept' | 'decline'
+  charity_response: 'accept' | 'decline'
   selected_recipient: string
   pickup_temperature_c: number | null
   cancelled: boolean
@@ -162,6 +179,15 @@ export type EventAnalysis = {
 }
 
 export type JobCommandType =
+  | 'HEADS_UP_SENT'
+  | 'HEADS_UP_CANCELLED'
+  | 'SLOT_ACKNOWLEDGED'
+  | 'REMINDER_SENT'
+  | 'END_OF_SERVICE_CONFIRMED'
+  | 'SURPLUS_CONFIRMED'
+  | 'VARIANCE_CLASSIFIED'
+  | 'REQUEST_UPDATED'
+  | 'ADHOC_REQUESTED'
   | 'CHEF_CONFIRMED'
   | 'OFFER_ACCEPTED'
   | 'OFFER_DECLINED'

@@ -70,7 +70,7 @@ def offer_to_food_bank(
     return record
 
 
-def offer_to_cold_storage(
+def offer_to_charity(
     batch_id: str,
     food_summary: str,
     weight_kg: float,
@@ -83,23 +83,22 @@ def offer_to_cold_storage(
         "batch_id": batch_id,
         "item_summary": food_summary,
         "estimated_weight_kg": weight_kg,
-        "storage_type": "chilled",
-        "facility_name": "Community Cold Store 01",
-        "facility_location": location,
+        "charity_name": "Registered charity (simulated)",
+        "pickup_location": location,
         "required_until": required_until,
         "simulated_response": response,
         "decline_reason": decline_reason if response == "decline" else "",
     }
     status = RECIPIENT_STATUSES[response]
-    record = create_record("public-cold-storage", payload, status)
+    record = create_record("registered-charity", payload, status)
     add_event(
         batch_id,
-        "PUBLIC_COLD_STORAGE_OFFER",
+        "REGISTERED_CHARITY_OFFER",
         status,
         (
-            f"Public cold-storage simulation {RECIPIENT_PAST_TENSE[response]} capacity."
+            f"Registered charity simulation {RECIPIENT_PAST_TENSE[response]} the offer."
             if not decline_reason or response == "accept"
-            else f"Public cold-storage simulation declined capacity: {decline_reason}"
+            else f"Registered charity simulation declined the offer: {decline_reason}"
         ),
         {"record_id": record["id"], "response": response, "reason": decline_reason},
     )

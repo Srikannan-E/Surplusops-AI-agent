@@ -6,7 +6,7 @@ import type { PortalRecord } from '../types'
 
 const serviceNames: Record<string, string> = {
   'uae-food-bank': 'Recipient offer',
-  'public-cold-storage': 'Community recipient offer',
+  'registered-charity': 'Registered charity offer',
   collecteroo: 'Logistics dispatch',
   reloop: 'Compost booking',
   'ne-ma-style-report': 'ne’ma-style impact record',

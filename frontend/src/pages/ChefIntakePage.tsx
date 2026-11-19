@@ -108,7 +108,7 @@ export function ChefIntakePage() {
       intake_confirmed: true,
       intake_confirmed_at: new Date().toISOString(),
       food_bank_response: 'accept',
-      cold_storage_response: 'accept',
+      charity_response: 'accept',
       rescue_result: null,
     }
     setSaving(true)

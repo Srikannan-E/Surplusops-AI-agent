@@ -31,6 +31,8 @@ class RescueWorkflowTests(unittest.TestCase):
         self.client = TestClient(app)
     def job_command(self, batch_id, key, command_type, actor, payload=None):
         command_payload = dict(payload or {})
+        if command_type == "CHEF_CONFIRMED" and command_payload.get("untouched_confirmed") is True:
+            command_payload.setdefault("handling_history_confirmed", True)
         if command_type == "PICKUP_CONFIRMED":
             details = self.client.get(
                 f"/api/jobs/{batch_id}/handover-credentials",
@@ -63,16 +65,17 @@ class RescueWorkflowTests(unittest.TestCase):
             "food_summary": "Sealed vegetable biryani trays",
             "estimated_weight_kg": 20,
             "untouched_confirmed": True,
+            "handling_history_confirmed": True,
             "allergens_from_menu": ["Dairy"],
             "halal_status": "verified_by_venue",
             "remaining_safe_minutes": 120,
             "pickup_eta_minutes": 25,
             "safety_buffer_minutes": 20,
             "food_bank_response": "accept",
-            "cold_storage_response": "accept",
+            "charity_response": "accept",
             "pickup_location": "Test Hotel loading bay",
             "food_bank_location": "Food bank hub (simulated)",
-            "cold_storage_location": "Cold store (simulated)",
+            "charity_location": "Registered charity hub (simulated)",
             "collection_deadline": "2026-06-11T00:30",
         }
         values.update(overrides)
@@ -156,22 +159,22 @@ class RescueWorkflowTests(unittest.TestCase):
         self.assertEqual(food_bank_record["payload"]["allergens_from_menu"], ["Dairy"])
         self.assertEqual(food_bank_record["payload"]["halal_status"], "verified_by_venue")
 
-    def test_declined_food_bank_routes_to_cold_storage(self):
+    def test_declined_food_bank_routes_to_registered_charity(self):
         result = run_rescue(self.make_request(
             batch_id="TEST-BATCH-002",
             food_bank_response="decline",
         ))
 
         self.assertEqual(result["outcome"], "dispatched")
-        self.assertEqual(result["selected_recipient"], "public-cold-storage")
+        self.assertEqual(result["selected_recipient"], "registered-charity")
         self.assertEqual(storage.list_records("uae-food-bank")[0]["status"], "SIMULATED_DECLINED")
-        self.assertEqual(storage.list_records("public-cold-storage")[0]["status"], "SIMULATED_ACCEPTED")
+        self.assertEqual(storage.list_records("registered-charity")[0]["status"], "SIMULATED_ACCEPTED")
 
     def test_all_recipient_declines_use_reloop_fallback(self):
         result = run_rescue(self.make_request(
             batch_id="TEST-BATCH-003",
             food_bank_response="decline",
-            cold_storage_response="decline",
+            charity_response="decline",
         ))
 
         self.assertEqual(result["outcome"], "safe-disposal-fallback")
@@ -228,6 +231,14 @@ class RescueWorkflowTests(unittest.TestCase):
         self.assertEqual(analysis_event["metadata"]["payload"]["inputs"]["voice_note"], "Three full biryani trays")
 
         batch_id = selected.json()["batch_id"]
+        end_of_service = self.job_command(
+            batch_id,
+            "event-end-of-service",
+            "END_OF_SERVICE_CONFIRMED",
+            "chef",
+            {"outcome": "some_left"},
+        )
+        self.assertEqual(end_of_service.status_code, 200)
         with patch("app.main.execute_tool", return_value={"ok": True}):
             confirmed = self.job_command(
                 batch_id,
@@ -238,6 +249,7 @@ class RescueWorkflowTests(unittest.TestCase):
                     "dishes": [analysis.json()["approved_items"][0]],
                     "photo_name": "leftovers.jpg",
                     "untouched_confirmed": True,
+                    "handling_history_confirmed": True,
                     "estimated_weight_kg": 12,
                 },
             )
@@ -251,8 +263,103 @@ class RescueWorkflowTests(unittest.TestCase):
         self.assertEqual(job["token_usage"]["calls"], 3)
         self.assertTrue(any(event["type"] == "FALLBACK" for event in job["events"]))
 
+    def test_heads_up_and_nothing_left_release_slot_and_seal_record(self):
+        _seed_demo_event()
+        event = next(item for item in self.client.get("/api/events").json() if item["id"] == "event-demo-banquet")
+        selected = self.client.post(f"/api/events/{event['id']}/select").json()
+        batch_id = selected["batch_id"]
+        before = selected["remaining_safe_seconds"]
+        heads_up = self.job_command(
+            batch_id,
+            "heads-up-no-surplus",
+            "HEADS_UP_SENT",
+            "organiser",
+            {"size_class": "small"},
+        )
+        self.assertEqual(heads_up.status_code, 200)
+        self.assertEqual(heads_up.json()["status"], "DRAFT")
+        self.assertTrue(heads_up.json()["donation_intent"]["is_estimate"])
+        self.assertEqual(heads_up.json()["remaining_safe_seconds"], before)
+        self.assertTrue(any(event["type"] == "HEADS_UP_SENT" for event in heads_up.json()["events"]))
+
+        acknowledged = self.job_command(
+            batch_id,
+            "heads-up-acknowledge",
+            "SLOT_ACKNOWLEDGED",
+            "recipient",
+            {"response": "acknowledged"},
+        )
+        self.assertTrue(acknowledged.json()["slot_acknowledged"])
+        done = self.job_command(
+            batch_id,
+            "no-surplus-outcome",
+            "END_OF_SERVICE_CONFIRMED",
+            "chef",
+            {"outcome": "nothing_left"},
+        )
+        self.assertEqual(done.status_code, 200)
+        self.assertEqual(done.json()["status"], "SEALED")
+        self.assertEqual(done.json()["outcome"], "no_surplus")
+        self.assertTrue(done.json()["slot_released"])
+        self.assertEqual(done.json()["donation_intent"]["status"], "cancelled_no_surplus")
+        self.assertTrue(any(event["type"] == "HEADS_UP_CANCELLED" for event in done.json()["events"]))
+        self.assertTrue(any(event["type"] == "AUDIT_SEALED" for event in done.json()["events"]))
+        self.assertTrue(done.json()["audit"]["hash_chain_verified"])
+
+    def test_event_countdown_waits_for_confirmed_end_of_service_surplus(self):
+        _seed_demo_event()
+        event = next(item for item in self.client.get("/api/events").json() if item["id"] == "event-demo-banquet")
+        selected = self.client.post(f"/api/events/{event['id']}/select").json()
+        batch_id = selected["batch_id"]
+        self.job_command(
+            batch_id,
+            "end-service-some-left",
+            "END_OF_SERVICE_CONFIRMED",
+            "chef",
+            {"outcome": "some_left"},
+        )
+        still_draft = self.client.get(f"/api/jobs/{batch_id}").json()
+        self.assertEqual(still_draft["status"], "DRAFT")
+        self.assertEqual(still_draft["remaining_safe_seconds"], 3600)
+        early = self.job_command(
+            batch_id,
+            "early-confirm-attempt",
+            "CHEF_CONFIRMED",
+            "chef",
+            {"dishes": ["Vegetable biryani"], "untouched_confirmed": True},
+        )
+        self.assertEqual(early.status_code, 409)
+
+        self.client.post(
+            f"/api/events/{event['id']}/analyze",
+            json={
+                "photo_name": "leftovers.jpg",
+                "voice_note": "Vegetable biryani",
+                "served_status": "untouched",
+            },
+        )
+        confirmed = self.job_command(
+            batch_id,
+            "surplus-confirm-after-end-service",
+            "CHEF_CONFIRMED",
+            "chef",
+            {
+                "dishes": ["Vegetable biryani"],
+                "photo_name": "leftovers.jpg",
+                "untouched_confirmed": True,
+                "handling_history_confirmed": True,
+                "estimated_weight_kg": 12,
+            },
+        )
+        self.assertEqual(confirmed.status_code, 200)
+        self.assertEqual(confirmed.json()["status"], "OFFERING")
+        self.assertEqual(confirmed.json()["donation_intent"]["status"], "confirmed")
+        self.assertFalse(confirmed.json()["donation_intent"]["is_estimate"])
+        self.assertTrue(any(event["type"] == "SURPLUS_CONFIRMED" for event in confirmed.json()["events"]))
+
         accepted = self.job_command(batch_id, "event-offer-accept", "OFFER_ACCEPTED", "recipient")
         self.assertEqual(accepted.status_code, 200)
+        self.assertTrue(any(event["type"] == "COLLECTION_DISPATCHED" for event in accepted.json()["events"]))
         self.assertNotIn("delivery_pin", accepted.json())
         self.assertNotIn("pickup_code", accepted.json())
         delivery_pin = self.client.get(
@@ -347,6 +454,7 @@ class RescueWorkflowTests(unittest.TestCase):
                 untouched_confirmed=True,
                 confirmed_items=["Biryani"],
                 remaining_minutes=0,
+                handling_history_confirmed=True,
             )
         with self.assertRaises(PolicyBlocked):
             policy_gate(
@@ -355,6 +463,31 @@ class RescueWorkflowTests(unittest.TestCase):
                 untouched_confirmed=True,
                 confirmed_items=["Biryani"],
                 remaining_minutes=20,
+                handling_history_confirmed=True,
+            )
+
+    def test_agent_policy_blocks_unknown_handling_history_and_guest_returns(self):
+        with self.assertRaisesRegex(PolicyBlocked, "history is unknown"):
+            policy_gate(
+                "send_offer",
+                {"confirmed_items": ["Biryani"], "remaining_minutes": 30},
+                untouched_confirmed=True,
+                confirmed_items=["Biryani"],
+                remaining_minutes=30,
+                handling_history_confirmed=False,
+            )
+        with self.assertRaisesRegex(PolicyBlocked, "Guest-returned"):
+            policy_gate(
+                "send_offer",
+                {
+                    "confirmed_items": ["Biryani"],
+                    "remaining_minutes": 30,
+                    "guest_return_items": ["Biryani"],
+                },
+                untouched_confirmed=True,
+                confirmed_items=["Biryani"],
+                remaining_minutes=30,
+                handling_history_confirmed=True,
             )
 
     def test_menu_extraction_requires_venue_confirmation(self):
@@ -696,7 +829,7 @@ class RescueWorkflowTests(unittest.TestCase):
             {"scenario": "decline_then_recover"},
         )
         self.assertEqual(selected.json()["food_bank_response"], "decline")
-        self.assertEqual(selected.json()["longer_life_response"], "accept")
+        self.assertEqual(selected.json()["charity_response"], "accept")
         self.job_command(
             batch_id,
             "intake-key-0003",
@@ -724,7 +857,7 @@ class RescueWorkflowTests(unittest.TestCase):
             "recipient",
         )
         self.assertEqual(recovered.json()["status"], "ACCEPTED")
-        self.assertEqual(recovered.json()["selected_recipient"], "public-cold-storage")
+        self.assertEqual(recovered.json()["selected_recipient"], "registered-charity")
         self.assertTrue(storage.verify_event_chain(storage.list_events(batch_id)))
 
     def test_expired_accepted_job_is_revoked_before_pickup(self):

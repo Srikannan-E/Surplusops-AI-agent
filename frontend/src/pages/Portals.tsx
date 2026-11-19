@@ -29,7 +29,7 @@ function clockText(seconds: number) {
 function PortalFrame({ children, error, reconnecting }: { children: ReactNode; error: string; reconnecting: boolean }) {
   const { job, refresh } = useJobSync()
   return <main className="portal-screen">
-    <header className="portal-header"><a className="portal-brand" href="/"><span className="brand-symbol">S</span><span>SurplusOps</span></a><div className="portal-header-badges">{job?.clock_speed === 60 && <span className="clock-badge">Sped up</span>}<span className="simulated-tag">Simulated partner</span></div></header>
+    <header className="portal-header"><a className="portal-brand" href="/"><span className="brand-symbol">S</span><span>SurplusOps</span></a><div className="portal-header-badges">{job?.clock_speed === 60 && <span className="clock-badge">Sped up</span>}<span className="simulated-tag">SIMULATED PARTNER</span></div></header>
     {reconnecting && <div className="portal-reconnect" role="status">◌ Reconnecting to live job…</div>}
     {error && <div className="portal-error" role="alert"><span>{error}</span>{!reconnecting && <button className="button button-outline" onClick={() => void refresh()} type="button">Retry</button>}</div>}
     {children}
@@ -42,12 +42,31 @@ function PortalLoading({ title }: { title: string }) {
 }
 
 export function RecipientPortalPage() {
-  return <RecipientPortalContent />
+  return <FoodBankPortalPage />
 }
 
-function RecipientPortalContent() {
+export function FoodBankPortalPage() {
+  const [tab, setTab] = useState<'inbox' | 'collection'>(() =>
+    new URLSearchParams(window.location.search).get('tab') === 'collection' ? 'collection' : 'inbox',
+  )
+  return <div className="portal-tabs">
+    <nav aria-label="Food Bank portal sections" className="portal-tab-list">
+      <button aria-pressed={tab === 'inbox'} className="simple-secondary" onClick={() => setTab('inbox')} type="button">Heads-up & offers</button>
+      <button aria-pressed={tab === 'collection'} className="simple-secondary" onClick={() => setTab('collection')} type="button">Collection</button>
+    </nav>
+    {tab === 'inbox' ? <RecipientPortalContent targetTier={1} /> : <DriverPortalContent />}
+  </div>
+}
+
+export function CharityPortalPage() {
+  return <RecipientPortalContent targetTier={2} />
+}
+
+function RecipientPortalContent({ targetTier }: { targetTier: 1 | 2 }) {
   const { job, loading, error, reconnecting, command, pending } = useJobSync()
   const [reason, setReason] = useState('')
+  const [acceptedSelection, setAcceptedSelection] = useState<{ batchId: string; dishes: string[] } | null>(null)
+  const [acceptedWeight, setAcceptedWeight] = useState('')
   const [handoverDetails, setHandoverDetails] = useState<{ pickup_code: string; delivery_pin: string } | null>(null)
   const [pinError, setPinError] = useState('')
   const remaining = usePortalClock(job)
@@ -64,37 +83,65 @@ function RecipientPortalContent() {
     return () => { active = false }
   }, [batchId, canRetrievePin, handoverDetails])
   if (loading || !job) return <PortalFrame error={error} reconnecting={reconnecting}><PortalLoading title="Recipient portal" /></PortalFrame>
-  const awaiting = job.status === 'OFFERING' && [1, 2].includes(job.current_tier)
+  const awaiting = job.status === 'OFFERING' && job.current_tier === targetTier
   const delivered = job.events.some((event) => event.type === 'DELIVERY_CONFIRMED')
   const accepted = ['ACCEPTED', 'PICKED_UP'].includes(job.status) && job.selected_recipient
-  const currentRecipient = job.current_tier === 1 ? 'Food Bank / charity partner' : 'Longer-life recovery partner'
-  const presetAccepts = job.scenario === 'happy_path' || (job.scenario === 'decline_then_recover' && job.current_tier === 2)
-  const presetReason = job.current_tier === 1 ? 'No capacity' : 'Pickup window too short'
+  const currentRecipient = targetTier === 1 ? 'Simulated Food Bank' : 'Registered charity'
+  const presetAccepts = job.scenario === 'nothing_left' || job.scenario === 'happy_path'
+    || ((job.scenario === 'bigger_expected' || job.scenario === 'decline_then_recover') && targetTier === 2)
+  const presetReason = targetTier === 1 ? 'No capacity' : 'Pickup window too short'
   const presetLabel = presetAccepts ? 'Accept' : 'Decline'
+  const selectedDishes = acceptedSelection?.batchId === job.batch_id ? acceptedSelection.dishes : job.dishes
+  const acknowledgeHeadsUp = () => command('SLOT_ACKNOWLEDGED', 'recipient', { response: 'acknowledged' })
   const submit = async (type: 'OFFER_ACCEPTED' | 'OFFER_DECLINED') => {
-    await command(type, 'recipient', type === 'OFFER_DECLINED' ? { reason } : {})
+    if (type === 'OFFER_DECLINED') {
+      await command(type, 'recipient', { reason })
+    } else {
+      const partial = selectedDishes.length !== job.dishes.length
+      await command(type, 'recipient', {
+        accepted_items: selectedDishes,
+        ...(partial ? { accepted_weight_kg: Number(acceptedWeight) } : {}),
+      })
+    }
     setReason('')
   }
   const applyPreset = () => command(
     presetAccepts ? 'OFFER_ACCEPTED' : 'OFFER_DECLINED',
     'recipient',
-    presetAccepts ? {} : { reason: presetReason },
+    presetAccepts ? {
+      accepted_items: selectedDishes,
+      ...(selectedDishes.length !== job.dishes.length ? { accepted_weight_kg: Number(acceptedWeight) } : {}),
+    } : { reason: presetReason },
   )
   return <PortalFrame error={error} reconnecting={reconnecting}>
     <div className="portal-content">
-      <div className="portal-heading"><span className="step-kicker">INCOMING FOOD OFFER</span><h1>{accepted ? 'Offer accepted' : awaiting ? `Can you take ${job.estimated_weight_kg} kg of ${job.dishes.join(' and ')}?` : 'Waiting for an offer'}</h1><p>{job.batch_id}</p></div>
-      {awaiting ? <section className="offer-card">
+      <div className="portal-heading"><span className="step-kicker">{targetTier === 1 ? 'FOOD BANK · SIMULATED' : 'REGISTERED CHARITY · SIMULATED'}</span><h1>{accepted ? 'Offer accepted' : awaiting ? `Can you take ${job.estimated_weight_kg} kg of ${job.dishes.join(' and ')}?` : 'Waiting for an offer'}</h1><p>{job.batch_id}</p></div>
+      {targetTier === 1 && job.status === 'DRAFT' && job.heads_up_sent ? <section className="offer-card">
+        <div className="offer-partner"><span className="partner-avatar">♡</span><span><strong>Possible surplus heads-up</strong><small>SIMULATED PARTNER · non-binding estimate</small></span><span className="offer-live">STANDBY</span></div>
+        <div className="offer-data"><div><span>Event</span><strong>{job.event_name}</strong></div><div><span>Expected size</span><strong>{job.donation_intent?.size_class ?? 'Not stated'} · Estimate</strong></div></div>
+        <p className="portal-caveat">This is not a confirmed donation or a guaranteed collection. Actual food details follow end-of-service confirmation.</p>
+        <button className="button button-primary portal-wide" disabled={pending || job.slot_acknowledged} onClick={() => void acknowledgeHeadsUp()} type="button">{job.slot_acknowledged ? 'Standby acknowledged' : 'Acknowledge standby'}</button>
+      </section> : awaiting ? <section className="offer-card">
         <div className="offer-partner"><span className="partner-avatar">♡</span><span><strong>{currentRecipient}</strong><small>Simulated partner</small></span><span className="offer-live">OFFER OPEN</span></div>
         <div className="offer-dishes"><span>PICKUP</span><strong>Pickup by {new Date(new Date(job.server_time).getTime() + 20 * 60_000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} · demo estimate</strong></div>
+        <fieldset className="dish-acceptance"><legend>Choose dishes you can accept</legend>
+          {job.dishes.map((dish) => <label key={dish}><input checked={selectedDishes.includes(dish)} onChange={(event) => {
+            const next = event.target.checked
+              ? [...selectedDishes, dish]
+              : selectedDishes.filter((item) => item !== dish)
+            setAcceptedSelection({ batchId: job.batch_id, dishes: next })
+          }} type="checkbox" />{dish}</label>)}
+        </fieldset>
+        {selectedDishes.length > 0 && selectedDishes.length < job.dishes.length && <label className="portal-field">Estimated weight for accepted dishes (kg)<input inputMode="decimal" min="0.1" max={job.estimated_weight_kg} step="0.1" type="number" value={acceptedWeight} onChange={(event) => setAcceptedWeight(event.target.value)} /></label>}
         <div className="offer-data"><div><span>Allergens</span><strong>{job.allergens.join(', ') || 'None listed'}</strong></div><div><span>Halal status</span><strong>{job.halal_status}</strong></div><div><span>Time left to place it safely</span><strong className={remaining < 900 ? 'urgent-text' : ''}>{clockText(remaining)}</strong></div></div>
         <p className="portal-caveat">Dietary details are venue-provided, not independently verified. An offer is not food-safety certification.</p>
         <div className="preset-response"><span>Story response: {presetLabel}{presetAccepts ? '' : ` · ${presetReason}`}</span><button className="text-button" disabled={pending} onClick={() => void applyPreset()} type="button">Use story response</button></div>
-        <button className="button button-primary portal-wide" disabled={pending} onClick={() => void submit('OFFER_ACCEPTED')} type="button">Yes, we'll take it</button>
+        <button className="button button-primary portal-wide" disabled={pending || selectedDishes.length === 0 || (selectedDishes.length !== job.dishes.length && (!acceptedWeight || Number(acceptedWeight) <= 0 || Number(acceptedWeight) > job.estimated_weight_kg))} onClick={() => void submit('OFFER_ACCEPTED')} type="button">Yes, we'll take it</button>
         <div className="decline-block"><span>Choose a reason if you can't take it</span><div className="reason-chips">{['No capacity', 'Pickup window too short', 'Food type not accepted'].map((value) => <button aria-pressed={reason === value} className={`reason-chip${reason === value ? ' selected' : ''}`} key={value} onClick={() => setReason(value)} type="button">{value}</button>)}</div><button className="button button-outline portal-wide" disabled={pending || !reason} onClick={() => void submit('OFFER_DECLINED')} type="button">No</button></div>
       </section>       : delivered ? <section className="portal-state-card success-state"><span className="state-symbol">✓</span><h2>Food received</h2><p>The delivery PIN was confirmed and the handover is complete.</p></section>
-        : accepted ? <section className="portal-state-card success-state"><span className="state-symbol">✓</span><h2>Waiting for driver</h2><p>{job.selected_recipient === 'uae-food-bank' ? 'Food Bank / charity' : 'Longer-life recovery partner'} accepted the offer. Keep the food ready for the simulated pickup scan.</p><span className="status-pill status-accepted">{job.status}</span>{handoverDetails && <div className="recipient-pin"><p>Share these per-job credentials with the assigned driver only.</p><QRCodeSVG aria-label="Pickup code for the driver" value={handoverDetails.pickup_code} size={128} /><span>Recipient pickup code · 8 digits</span><strong className="recipient-pin-code">{handoverDetails.pickup_code}</strong><span>Driver enters this delivery PIN at handover · 6 digits</span><strong className="recipient-pin-code">{handoverDetails.delivery_pin}</strong></div>}{pinError && <p className="inline-error" role="alert">{pinError}</p>}</section>
+        : accepted && targetTier === job.current_tier ? <section className="portal-state-card success-state"><span className="state-symbol">✓</span><h2>Waiting for driver</h2><p>{currentRecipient} accepted the offer. Keep the food ready for the simulated pickup scan.</p><span className="status-pill status-accepted">{job.status}</span>{handoverDetails && <div className="recipient-pin"><p>Share these per-job credentials with the assigned driver only.</p><QRCodeSVG aria-label="Pickup code for the driver" value={handoverDetails.pickup_code} size={128} /><span>Recipient pickup code · 8 digits</span><strong className="recipient-pin-code">{handoverDetails.pickup_code}</strong><span>Driver enters this delivery PIN at handover · 6 digits</span><strong className="recipient-pin-code">{handoverDetails.delivery_pin}</strong></div>}{pinError && <p className="inline-error" role="alert">{pinError}</p>}</section>
         : job.status === 'COMPOST_REQUESTED' || job.cancelled ? <section className="portal-state-card stop-state"><span className="state-symbol">!</span><h2>Offer cancelled</h2><p>Do not collect or consume. The batch has been stopped and routed away from human consumption.</p></section>
-          : <section className="portal-state-card"><span className="state-symbol">◌</span><h2>No open offer</h2><p>An incoming offer will appear here when the chef confirms intake on the command console.</p></section>}
+          : <section className="portal-state-card"><span className="state-symbol">◌</span><h2>{job.heads_up_sent && !job.end_of_service_outcome ? 'Waiting for end of service' : 'No open offer'}</h2><p>{job.heads_up_sent ? 'The heads-up is only an estimate. A confirmed offer will appear after the chef reports actual surplus.' : 'An incoming offer will appear here when the chef confirms intake on the command console.'}</p></section>}
     </div>
   </PortalFrame>
 }

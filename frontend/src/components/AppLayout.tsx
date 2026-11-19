@@ -37,7 +37,7 @@ const navGroups = [
       { to: '/services/uae-food-bank', label: 'Food Bank adapter', icon: 'A1' },
       { to: '/services/collecteroo', label: 'Collecteroo adapter', icon: 'A2' },
       { to: '/services/reloop', label: 'Reloop adapter', icon: 'A3' },
-      { to: '/services/public-cold-storage', label: 'Community capacity', icon: 'A4' },
+      { to: '/services/registered-charity', label: 'Registered charity', icon: 'A4' },
     ],
   },
 ]

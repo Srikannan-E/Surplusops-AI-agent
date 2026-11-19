@@ -1819,6 +1819,77 @@ button:disabled {
   }
 }
 
+.portal-tabs {
+  display: grid;
+  gap: 12px;
+}
+
+.portal-tab-list {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  padding: 0 16px;
+}
+
+.portal-tab-list button[aria-pressed="true"] {
+  border-color: #256d43;
+  color: #174b2d;
+}
+
+.dish-acceptance {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid #dfe5df;
+  border-radius: 12px;
+}
+
+.dish-acceptance legend {
+  padding: 0 4px;
+  font-weight: 650;
+}
+
+.dish-acceptance label {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 10px;
+}
+
+.dish-acceptance input {
+  width: 20px;
+  height: 20px;
+}
+
+.heads-up-size,
+.end-of-service-choices {
+  display: grid;
+  gap: 10px;
+}
+
+.heads-up-size select {
+  min-height: 44px;
+  margin-top: 6px;
+  padding: 8px 12px;
+  border: 1px solid #cbd4cb;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.assumed-badge {
+  display: inline-flex;
+  margin-left: 6px;
+  padding: 2px 7px;
+  border: 1px solid #d8d1b3;
+  border-radius: 999px;
+  background: #faf8ef;
+  color: #51461b;
+  font-size: 12px;
+  font-weight: 650;
+  text-transform: uppercase;
+}
+
   .intake-stepper {
     display: flex;
     justify-content: center;
@@ -2119,6 +2190,77 @@ button:disabled {
     .intake-stepper {
       justify-content: space-between;
       gap: 6px;
+    }
+
+    .portal-tabs {
+      display: grid;
+      gap: 12px;
+    }
+
+    .portal-tab-list {
+      display: flex;
+      gap: 8px;
+      justify-content: center;
+      padding: 0 16px;
+    }
+
+    .portal-tab-list button[aria-pressed="true"] {
+      border-color: #256d43;
+      color: #174b2d;
+    }
+
+    .dish-acceptance {
+      display: grid;
+      gap: 8px;
+      margin: 0;
+      padding: 12px;
+      border: 1px solid #dfe5df;
+      border-radius: 12px;
+    }
+
+    .dish-acceptance legend {
+      padding: 0 4px;
+      font-weight: 650;
+    }
+
+    .dish-acceptance label {
+      display: flex;
+      min-height: 44px;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .dish-acceptance input {
+      width: 20px;
+      height: 20px;
+    }
+
+    .heads-up-size,
+    .end-of-service-choices {
+      display: grid;
+      gap: 10px;
+    }
+
+    .heads-up-size select {
+      min-height: 44px;
+      margin-top: 6px;
+      padding: 8px 12px;
+      border: 1px solid #cbd4cb;
+      border-radius: 8px;
+      background: #fff;
+    }
+
+    .assumed-badge {
+      display: inline-flex;
+      margin-left: 6px;
+      padding: 2px 7px;
+      border: 1px solid #d8d1b3;
+      border-radius: 999px;
+      background: #faf8ef;
+      color: #51461b;
+      font-size: 12px;
+      font-weight: 650;
+      text-transform: uppercase;
     }
 
     .intake-stepper li {

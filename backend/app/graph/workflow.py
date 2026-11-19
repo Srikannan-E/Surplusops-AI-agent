@@ -10,7 +10,7 @@ from app.domain.storage import add_event
 from app.integrations.simulated.adapters import (
     book_reloop_fallback,
     dispatch_collecteroo,
-    offer_to_cold_storage,
+    offer_to_charity,
     offer_to_food_bank,
 )
 
@@ -22,6 +22,7 @@ class RescueState(TypedDict, total=False):
     food_summary: str
     estimated_weight_kg: float
     untouched_confirmed: bool
+    handling_history_confirmed: bool
     allergens_from_menu: list[str]
     halal_status: str
     remaining_safe_minutes: int
@@ -29,11 +30,11 @@ class RescueState(TypedDict, total=False):
     safety_buffer_minutes: int
     food_bank_response: str
     food_bank_decline_reason: str
-    cold_storage_response: str
-    cold_storage_decline_reason: str
+    charity_response: str
+    charity_decline_reason: str
     pickup_location: str
     food_bank_location: str
-    cold_storage_location: str
+    charity_location: str
     collection_deadline: str
     safety_eligible: bool
     safety_reason: str
@@ -48,9 +49,12 @@ def safety_gate(state: RescueState) -> RescueState:
         state["pickup_eta_minutes"] + state["safety_buffer_minutes"]
         <= state["remaining_safe_minutes"]
     )
-    eligible = state["untouched_confirmed"] and enough_time
+    handling_known = state.get("handling_history_confirmed", False)
+    eligible = state["untouched_confirmed"] and handling_known and enough_time
     if not state["untouched_confirmed"]:
         reason = "Untouched/unserved status was not confirmed."
+    elif not handling_known:
+        reason = "Food handling and temperature history is unknown."
     elif not enough_time:
         reason = "Estimated pickup ETA plus safety buffer exceeds remaining window."
     else:
@@ -62,6 +66,7 @@ def safety_gate(state: RescueState) -> RescueState:
         reason,
         {
             "untouched_confirmed": state["untouched_confirmed"],
+            "handling_history_confirmed": handling_known,
             "remaining_safe_minutes": state["remaining_safe_minutes"],
             "pickup_eta_minutes": state["pickup_eta_minutes"],
             "safety_buffer_minutes": state["safety_buffer_minutes"],
@@ -100,36 +105,36 @@ def offer_food_bank(state: RescueState) -> RescueState:
     }
 
 
-def route_after_food_bank(state: RescueState) -> Literal["dispatch", "cold_storage"]:
-    return "dispatch" if state["food_bank_response"] == "accept" else "cold_storage"
+def route_after_food_bank(state: RescueState) -> Literal["dispatch", "charity"]:
+    return "dispatch" if state["food_bank_response"] == "accept" else "charity"
 
 
-def offer_cold_storage(state: RescueState) -> RescueState:
-    record = offer_to_cold_storage(
+def offer_charity(state: RescueState) -> RescueState:
+    record = offer_to_charity(
         batch_id=state["batch_id"],
         food_summary=state["food_summary"],
         weight_kg=state["estimated_weight_kg"],
-        response=state["cold_storage_response"],
-        decline_reason=state["cold_storage_decline_reason"],
-        location=state["cold_storage_location"],
+        response=state["charity_response"],
+        decline_reason=state["charity_decline_reason"],
+        location=state["charity_location"],
         required_until=state["collection_deadline"],
     )
     return {
-        "selected_recipient": "public-cold-storage",
-        "outcome": f"cold-storage-{state['cold_storage_response']}",
+        "selected_recipient": "registered-charity",
+        "outcome": f"charity-{state['charity_response']}",
         "final_record_id": record["id"],
     }
 
 
-def route_after_cold_storage(state: RescueState) -> Literal["dispatch", "fallback"]:
-    return "dispatch" if state["cold_storage_response"] == "accept" else "fallback"
+def route_after_charity(state: RescueState) -> Literal["dispatch", "fallback"]:
+    return "dispatch" if state["charity_response"] == "accept" else "fallback"
 
 
 def create_dispatch(state: RescueState) -> RescueState:
     if state["selected_recipient"] == "uae-food-bank":
         dropoff = state["food_bank_location"]
     else:
-        dropoff = state["cold_storage_location"]
+        dropoff = state["charity_location"]
     record = dispatch_collecteroo(
         batch_id=state["batch_id"],
         pickup_location=state["pickup_location"],
@@ -150,7 +155,7 @@ def create_dispatch(state: RescueState) -> RescueState:
 def fallback(state: RescueState) -> RescueState:
     fallback_reason = state.get("safety_reason", "All eligible recipients declined.")
     if state.get("safety_eligible") and state.get("food_bank_response") == "decline":
-        fallback_reason = state.get("cold_storage_decline_reason") or "All eligible recipients declined."
+        fallback_reason = state.get("charity_decline_reason") or "All eligible recipients declined."
     record = book_reloop_fallback(
         batch_id=state["batch_id"],
         venue_name=state["venue_name"],
@@ -170,7 +175,7 @@ def build_graph():
     graph = StateGraph(RescueState)
     graph.add_node("safety_gate", safety_gate)
     graph.add_node("offer_food_bank", offer_food_bank)
-    graph.add_node("offer_cold_storage", offer_cold_storage)
+    graph.add_node("offer_charity", offer_charity)
     graph.add_node("dispatch", create_dispatch)
     graph.add_node("fallback", fallback)
 
@@ -183,11 +188,11 @@ def build_graph():
     graph.add_conditional_edges(
         "offer_food_bank",
         route_after_food_bank,
-        {"dispatch": "dispatch", "cold_storage": "offer_cold_storage"},
+        {"dispatch": "dispatch", "charity": "offer_charity"},
     )
     graph.add_conditional_edges(
-        "offer_cold_storage",
-        route_after_cold_storage,
+        "offer_charity",
+        route_after_charity,
         {"dispatch": "dispatch", "fallback": "fallback"},
     )
     graph.add_edge("dispatch", END)

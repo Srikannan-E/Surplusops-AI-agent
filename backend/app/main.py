@@ -21,8 +21,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import ValidationError
 from starlette.responses import Response, StreamingResponse
 from app.domain.models import (
-    ColdStorageRequest,
+    CharityRequest,
     CollecterooRequest,
+    DonationIntent,
     CustodyAction,
     FoodBankRequest,
     FoodEvent,
@@ -30,6 +31,7 @@ from app.domain.models import (
     MenuExtractRequest,
     IntakeConfirmation,
     JobCommand,
+    Reconcile,
     NemaStyleRecord,
     OrganiserTakeover,
     RescueRevokeRequest,
@@ -91,7 +93,7 @@ SERVICE_MODELS = {
     "reloop": ReloopRequest,
     "collecteroo": CollecterooRequest,
     "uae-food-bank": FoodBankRequest,
-    "public-cold-storage": ColdStorageRequest,
+    "registered-charity": CharityRequest,
 }
 
 SERVICE_DETAILS = [
@@ -117,10 +119,10 @@ SERVICE_DETAILS = [
         "mode": "SIMULATED",
     },
     {
-        "id": "public-cold-storage",
-        "name": "Public Cold Storage",
-        "category": "Community cold-storage capacity",
-        "description": "Seeded public/community cold-storage facility simulation; not a live facility directory.",
+        "id": "registered-charity",
+        "name": "Registered charity",
+        "category": "Food rescue fallback",
+        "description": "Simulated offer to a registered charity; no real recipient is contacted.",
         "mode": "SIMULATED",
     },
 ]
@@ -272,7 +274,7 @@ def select_food_event(event_id: str) -> dict[str, Any]:
             "allergens": sorted({allergen for item in event["menu_items"] for allergen in item["allergens"]}),
             "halal_status": "declared by venue; unverified",
         })
-        _append_job_event(job, "EVENT_SELECTED", "chef", False, {"event_id": event_id, "name": event["name"]})
+        _append_job_event(job, "EVENT_READY", "chef", False, {"event_id": event_id, "name": event["name"]})
         save_job(job["batch_id"], job)
         return _job_view(job)
 
@@ -403,6 +405,13 @@ def _new_job_snapshot() -> dict[str, Any]:
     return {
         "batch_id": batch_id,
         "event_id": "",
+        "donation_intent": {"status": "standby", "size_class": None, "is_estimate": True},
+        "heads_up_sent": False,
+        "slot_acknowledged": False,
+        "slot_released": False,
+        "reconcile": Reconcile().model_dump(),
+        "outcome": "",
+        "end_of_service_outcome": "",
         "photos": [],
         "observations": [],
         "unmatched": [],
@@ -426,15 +435,15 @@ def _new_job_snapshot() -> dict[str, Any]:
         "current_tier": 0,
         "rungs": {
             "1": {"label": "People first", "state": "idle", "attempts": []},
-            "2": {"label": "Longer-life channel", "state": "idle", "attempts": []},
+            "2": {"label": "Registered charity", "state": "idle", "attempts": []},
             "3": {"label": "Composting", "state": "idle", "attempts": []},
             "4": {"label": "Human", "state": "idle", "attempts": []},
         },
         "scenario": "happy_path",
         "food_bank_response": "accept",
         "food_bank_decline_reason": "",
-        "longer_life_response": "accept",
-        "longer_life_decline_reason": "",
+        "charity_response": "accept",
+        "charity_decline_reason": "",
         "selected_recipient": "",
         "pickup_temperature_c": None,
         "cancelled": False,
@@ -451,6 +460,13 @@ def _normalize_job(job: dict[str, Any]) -> dict[str, Any]:
     job.setdefault("compost_only", [])
     job.setdefault("token_usage", {"prompt_tokens": 0, "output_tokens": 0, "calls": 0})
     job.setdefault("agent_llm_calls", 0)
+    job.setdefault("donation_intent", {"status": "standby", "size_class": None, "is_estimate": True})
+    job.setdefault("heads_up_sent", False)
+    job.setdefault("slot_acknowledged", False)
+    job.setdefault("slot_released", False)
+    job.setdefault("reconcile", Reconcile().model_dump())
+    job.setdefault("outcome", "")
+    job.setdefault("end_of_service_outcome", "")
     return job
 
 
@@ -542,6 +558,16 @@ def _append_job_event(
 def _event_summary(event_type: str, payload: dict[str, Any]) -> str:
     summaries = {
         "JOB_CREATED": "A new demo rescue job was created.",
+        "EVENT_READY": "The event menu is ready for a non-binding heads-up.",
+        "HEADS_UP_SENT": "A simulated Food Bank heads-up was sent; it is not a donation commitment.",
+        "HEADS_UP_CANCELLED": "The heads-up was cancelled and the reserved slot was released.",
+        "SLOT_ACKNOWLEDGED": "The simulated Food Bank acknowledged the standby request.",
+        "REMINDER_SENT": "A simulated end-of-service reminder was recorded.",
+        "END_OF_SERVICE_CONFIRMED": "The end-of-service outcome was recorded.",
+        "SURPLUS_CONFIRMED": "The chef confirmed untouched back-of-house surplus; the safety countdown started.",
+        "VARIANCE_CLASSIFIED": "The actual surplus was compared with the heads-up estimate.",
+        "REQUEST_UPDATED": "The simulated Food Bank request was updated to match confirmed surplus.",
+        "ADHOC_REQUESTED": "No heads-up existed; an ad hoc simulated Food Bank request was recorded.",
         "ITEMS_PROPOSED": "The intake photo and menu items were proposed for review.",
         "CHEF_CONFIRMED": "The chef confirmed the intake details and untouched status.",
         "WINDOW_COMPUTED": "The safe-window countdown and escalation point were set.",
@@ -551,6 +577,7 @@ def _event_summary(event_type: str, payload: dict[str, Any]) -> str:
         "REPLAN": f"The rescue plan moved to {payload.get('recipient', 'the next rung')}.",
         "PICKUP_CONFIRMED": "Driver pickup and the handover temperature were recorded.",
         "DELIVERY_CONFIRMED": "The delivery PIN was verified and handover was recorded.",
+        "INSPECTION_RESULT": "The recipient recorded which dishes can be accepted.",
         "ESCALATED": "The human-escalation threshold was reached.",
         "HUMAN_TAKEOVER": "An organiser took over the rescue.",
         "WINDOW_EXPIRED": "The safe window expired; human-consumption routing stopped.",
@@ -577,7 +604,7 @@ def _event_envelope(event: dict[str, Any], seq: int) -> dict[str, Any]:
         "simulated",
         event["status"].startswith("SIMULATED") or event["event_type"] in {
             "FOOD_BANK_OFFER_SENT",
-            "COLD_STORAGE_OFFER_SENT",
+            "REGISTERED_CHARITY_OFFER_SENT",
             "COMPOST_FALLBACK_BOOKED",
         },
     )
@@ -652,6 +679,7 @@ def _record_tool_call(
             untouched_confirmed=job.get("untouched_confirmed") is True,
             confirmed_items=job.get("approved_items", []),
             remaining_minutes=remaining_minutes,
+            handling_history_confirmed=job.get("handling_history_confirmed") is True,
         )
     except PolicyBlocked as exc:
         _append_job_event(job, "POLICY_BLOCK", "agent", False, {
@@ -735,7 +763,7 @@ def _run_intake_tool_loop(job: dict[str, Any], event: dict[str, Any]) -> None:
 def _run_existing_rescue(
     job: dict[str, Any],
     food_bank_response: str,
-    longer_life_response: str,
+    charity_response: str,
     remaining_safe_minutes: int | None = None,
 ) -> dict[str, Any]:
     request = RescueRunRequest(
@@ -745,6 +773,7 @@ def _run_existing_rescue(
         food_summary=job["food_summary"],
         estimated_weight_kg=job["estimated_weight_kg"],
         untouched_confirmed=job["untouched_confirmed"],
+        handling_history_confirmed=job.get("handling_history_confirmed") is True,
         allergens_from_menu=job["allergens"],
         halal_status="verified_by_venue",
         remaining_safe_minutes=(
@@ -756,11 +785,11 @@ def _run_existing_rescue(
         safety_buffer_minutes=15,
         food_bank_response=food_bank_response,
         food_bank_decline_reason=job["food_bank_decline_reason"],
-        cold_storage_response=longer_life_response,
-        cold_storage_decline_reason=job["longer_life_decline_reason"],
+        charity_response=charity_response,
+        charity_decline_reason=job["charity_decline_reason"],
         pickup_location=job["pickup_location"],
         food_bank_location="Simulated community partner",
-        cold_storage_location="Simulated longer-life partner",
+        charity_location="Simulated registered charity hub",
         collection_deadline=datetime.now(timezone.utc).isoformat(),
     )
     return run_rescue(request)
@@ -845,6 +874,15 @@ def get_demo_job(batch_id: str) -> dict[str, Any]:
 
 def _validate_job_actor(command: JobCommand) -> None:
     expected = {
+        "HEADS_UP_SENT": "organiser",
+        "HEADS_UP_CANCELLED": "organiser",
+        "SLOT_ACKNOWLEDGED": "recipient",
+        "REMINDER_SENT": "organiser",
+        "END_OF_SERVICE_CONFIRMED": "chef",
+        "SURPLUS_CONFIRMED": "chef",
+        "VARIANCE_CLASSIFIED": "agent",
+        "REQUEST_UPDATED": "agent",
+        "ADHOC_REQUESTED": "agent",
         "JOB_RESET": "organiser",
         "CHEF_CONFIRMED": "chef",
         "OFFER_ACCEPTED": "recipient",
@@ -885,19 +923,175 @@ def post_job_command(batch_id: str, command: JobCommand) -> dict[str, Any]:
         _validate_job_actor(command)
         payload = command.payload
         event_type = command.type
-        if event_type == "SCENARIO_SELECTED":
+        if event_type == "HEADS_UP_SENT":
+            if job["status"] != "DRAFT" or not job.get("event_id"):
+                raise HTTPException(status_code=409, detail="Select a saved event before sending its heads-up.")
+            if job.get("heads_up_sent"):
+                raise HTTPException(status_code=409, detail="A heads-up has already been sent for this event.")
+            try:
+                intent = DonationIntent.model_validate({
+                    "status": "standby",
+                    "size_class": payload.get("size_class"),
+                    "is_estimate": True,
+                })
+            except ValidationError as exc:
+                raise HTTPException(status_code=422, detail="Choose a valid heads-up size class.") from exc
+            job["donation_intent"] = intent.model_dump()
+            job["heads_up_sent"] = True
+            record = create_record("uae-food-bank", {
+                "batch_id": batch_id,
+                "event_id": job["event_id"],
+                "event_name": job["event_name"],
+                "size_class": intent.size_class,
+                "is_estimate": True,
+                "non_binding": True,
+            }, "SIMULATED_HEADS_UP_SENT")
+            job["food_bank_request_record_id"] = record["id"]
+            _append_job_event(job, event_type, command.actor, True, {
+                "size_class": intent.size_class,
+                "is_estimate": True,
+                "record_id": record["id"],
+            })
+            _record_tool_call(
+                job,
+                "send_heads_up",
+                {"event_id": job["event_id"], "size_class": intent.size_class or ""},
+                "Send a non-binding standby estimate; it does not reserve guaranteed capacity.",
+            )
+        elif event_type == "HEADS_UP_CANCELLED":
+            if not job.get("heads_up_sent") or job.get("donation_intent", {}).get("status") != "standby":
+                raise HTTPException(status_code=409, detail="There is no active heads-up to cancel.")
+            job["donation_intent"]["status"] = "cancelled_no_surplus"
+            job["status"] = "SEALED"
+            job["outcome"] = "no_surplus"
+            _append_job_event(job, event_type, command.actor, True, {"reason": payload.get("reason", "No surplus")})
+            _record_tool_call(
+                job,
+                "cancel_heads_up",
+                {"event_id": job["event_id"], "reason": str(payload.get("reason", "No surplus"))},
+                "Withdraw the non-binding standby request.",
+            )
+            _record_tool_call(job, "release_slot", {"event_id": job["event_id"]}, "Release the standby slot.")
+            _record_tool_call(job, "seal_audit_record", {"batch_id": batch_id}, "Seal the no-surplus hotel record.")
+            _record_tool_call(
+                job,
+                "calculate_impact",
+                {"weight_kg": 0, "co2e_factor": 2.5},
+                "Record zero diverted weight; impact factors are estimates.",
+            )
+            _append_job_event(job, "AUDIT_SEALED", "system", False, {"outcome": "no_surplus"})
+        elif event_type == "SLOT_ACKNOWLEDGED":
+            if not job.get("heads_up_sent") or job.get("status") != "DRAFT":
+                raise HTTPException(status_code=409, detail="There is no active heads-up to acknowledge.")
+            job["slot_acknowledged"] = True
+            _append_job_event(job, event_type, command.actor, True, {
+                "response": payload.get("response", "acknowledged"),
+                "proposed_slot": payload.get("proposed_slot", ""),
+            })
+        elif event_type == "REMINDER_SENT":
+            if job.get("status") != "DRAFT" or not job.get("event_id"):
+                raise HTTPException(status_code=409, detail="A reminder can only be recorded for a planned event.")
+            _append_job_event(job, event_type, command.actor, True, {"event_id": job["event_id"]})
+            _record_tool_call(
+                job,
+                "send_reminder",
+                {"event_id": job["event_id"]},
+                "Nudge the kitchen to confirm actual end-of-service surplus.",
+            )
+        elif event_type == "END_OF_SERVICE_CONFIRMED":
+            if job.get("status") != "DRAFT" or not job.get("event_id"):
+                raise HTTPException(status_code=409, detail="Select a saved event before confirming end of service.")
+            outcome = payload.get("outcome")
+            if outcome not in {"nothing_left", "some_left", "not_sure"}:
+                raise HTTPException(status_code=422, detail="Choose nothing left, some left, or not sure.")
+            previous_outcome = job.get("end_of_service_outcome")
+            if previous_outcome == outcome:
+                raise HTTPException(status_code=409, detail="That end-of-service outcome is already recorded.")
+            if previous_outcome not in {"", None, "some_left", "not_sure"}:
+                raise HTTPException(status_code=409, detail="The end-of-service outcome can no longer be changed.")
+            job["end_of_service_outcome"] = outcome
+            job["reconcile"]["variance_types"] = (
+                ["no_surplus"] if outcome == "nothing_left" else
+                ["unscheduled"] if not job.get("heads_up_sent") else []
+            )
+            _append_job_event(job, event_type, command.actor, False, {"outcome": outcome})
+            _record_tool_call(
+                job,
+                "confirm_end_of_service",
+                {"outcome": outcome},
+                "Record the chef's end-of-service response.",
+            )
+            if outcome == "nothing_left":
+                if job.get("heads_up_sent") and job["donation_intent"]["status"] == "standby":
+                    job["donation_intent"]["status"] = "cancelled_no_surplus"
+                    _append_job_event(job, "HEADS_UP_CANCELLED", "agent", True, {"reason": "No surplus remained."})
+                    _record_tool_call(
+                        job,
+                        "cancel_heads_up",
+                        {"event_id": job["event_id"], "reason": "No surplus remained."},
+                        "Withdraw the non-binding standby request.",
+                    )
+                else:
+                    job["donation_intent"]["status"] = "cancelled_no_surplus"
+                record = create_record("uae-food-bank", {
+                    "batch_id": batch_id,
+                    "event_id": job["event_id"],
+                    "action": "release_slot",
+                    "reason": "no_surplus",
+                }, "SIMULATED_SLOT_RELEASED")
+                job["slot_released"] = True
+                job["status"] = "SEALED"
+                job["outcome"] = "no_surplus"
+                _record_tool_call(
+                    job,
+                    "release_slot",
+                    {"event_id": job["event_id"]},
+                    "No surplus remained, so the non-binding standby slot was released.",
+                )
+                _record_tool_call(job, "seal_audit_record", {"batch_id": batch_id}, "Seal the no-surplus hotel record.")
+                _record_tool_call(
+                    job,
+                    "calculate_impact",
+                    {"weight_kg": 0, "co2e_factor": 2.5},
+                    "Record zero diverted weight; impact factors are estimates.",
+                )
+                _append_job_event(job, "AUDIT_SEALED", "system", False, {"outcome": "no_surplus"})
+            elif not job.get("heads_up_sent") and not any(
+                item["event_type"] == "ADHOC_REQUESTED" for item in list_events(batch_id)
+            ):
+                record = create_record("uae-food-bank", {
+                    "batch_id": batch_id,
+                    "event_id": job["event_id"],
+                    "event_name": job["event_name"],
+                    "status": "ad_hoc_request",
+                }, "SIMULATED_ADHOC_REQUESTED")
+                job["food_bank_request_record_id"] = record["id"]
+                _append_job_event(job, "ADHOC_REQUESTED", "agent", True, {"record_id": record["id"]})
+                _record_tool_call(
+                    job,
+                    "request_adhoc_slot",
+                    {"event_id": job["event_id"], "items": []},
+                    "There was no heads-up; ask the simulated Food Bank to decide an ad hoc request.",
+                )
+        elif event_type in {"VARIANCE_CLASSIFIED", "REQUEST_UPDATED"}:
+            raise HTTPException(status_code=422, detail=f"{event_type} is generated by the reconciliation workflow.")
+        elif event_type == "SURPLUS_CONFIRMED":
+            raise HTTPException(status_code=422, detail="Surplus confirmation is recorded with the chef's intake command.")
+        elif event_type == "SCENARIO_SELECTED":
             if job["status"] != "DRAFT":
                 raise HTTPException(status_code=409, detail="Choose a scenario before confirming intake.")
             scenario = payload.get("scenario")
             plans = {
+                "bigger_expected": ("decline", "accept"),
+                "nothing_left": ("accept", "accept"),
+                "nobody_accepts": ("decline", "decline"),
                 "happy_path": ("accept", "accept"),
                 "decline_then_recover": ("decline", "accept"),
-                "nobody_accepts": ("decline", "decline"),
             }
             if scenario not in plans:
                 raise HTTPException(status_code=422, detail="Unknown demo scenario.")
             job["scenario"] = scenario
-            job["food_bank_response"], job["longer_life_response"] = plans[scenario]
+            job["food_bank_response"], job["charity_response"] = plans[scenario]
             _append_job_event(job, event_type, command.actor, False, payload)
         elif event_type == "DEMO_CLOCK_CHANGED":
             speed = payload.get("speed")
@@ -910,6 +1104,11 @@ def post_job_command(batch_id: str, command: JobCommand) -> dict[str, Any]:
         elif event_type == "CHEF_CONFIRMED":
             if job["status"] != "DRAFT":
                 raise HTTPException(status_code=409, detail="This job intake is already confirmed.")
+            if job.get("event_id") and not job.get("end_of_service_outcome"):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Record the end-of-service outcome before confirming surplus.",
+                )
             dishes = payload.get("dishes")
             if not isinstance(dishes, list) or not dishes or not all(isinstance(item, str) for item in dishes):
                 raise HTTPException(status_code=422, detail="Select at least one menu item.")
@@ -942,11 +1141,13 @@ def post_job_command(batch_id: str, command: JobCommand) -> dict[str, Any]:
                     "halal_status": "declared by venue; unverified",
                 })
             untouched = payload.get("untouched_confirmed") is True
+            handling_history_confirmed = payload.get("handling_history_confirmed") is True
             if job.get("event_id") and job.get("compost_only"):
                 untouched = False
             if job.get("event_id"):
                 job["approved_items"] = list(dishes) if untouched else []
             job["untouched_confirmed"] = untouched
+            job["handling_history_confirmed"] = handling_history_confirmed
             job["remaining_safe_seconds"] = 3600
             job["clock_anchor"] = datetime.now(timezone.utc).isoformat()
             confirmation = IntakeConfirmation(
@@ -969,7 +1170,69 @@ def post_job_command(batch_id: str, command: JobCommand) -> dict[str, Any]:
                 }
             )
             _append_job_event(job, "ITEMS_PROPOSED", "agent", False, {"dishes": dishes})
-            _append_job_event(job, event_type, command.actor, False, {"untouched_confirmed": untouched})
+            _append_job_event(job, event_type, command.actor, False, {
+                "untouched_confirmed": untouched,
+                "handling_history_confirmed": handling_history_confirmed,
+            })
+            if untouched and handling_history_confirmed:
+                job["donation_intent"] = {
+                    **job["donation_intent"],
+                    "status": "confirmed",
+                    "is_estimate": False,
+                }
+                job["reconcile"]["actual_weight_kg"] = confirmation.estimated_weight_kg
+                _append_job_event(job, "SURPLUS_CONFIRMED", command.actor, False, {
+                    "estimated_weight_kg": confirmation.estimated_weight_kg,
+                    "dishes": dishes,
+                })
+                variance = ["more_than_expected"] if job.get("scenario") == "bigger_expected" else []
+                if job.get("event_id") and not job.get("heads_up_sent"):
+                    variance.append("unscheduled")
+                _record_tool_call(
+                    job,
+                    "compare_to_plan",
+                    {
+                        "size_class": job["donation_intent"].get("size_class") or "",
+                        "actual_weight_kg": confirmation.estimated_weight_kg,
+                    },
+                    "Compare actual quantity with the estimate without applying unset size-class thresholds.",
+                )
+                if variance:
+                    job["reconcile"]["variance_types"] = variance
+                    _record_tool_call(
+                        job,
+                        "classify_variance",
+                        {"variance_types": variance},
+                        "Classify explicit scripted or unscheduled variance signals.",
+                    )
+                    _append_job_event(job, "VARIANCE_CLASSIFIED", "agent", False, {
+                        "variance_types": variance,
+                        "size_class": job["donation_intent"].get("size_class"),
+                        "actual_weight_kg": confirmation.estimated_weight_kg,
+                    })
+                    updated_record = create_record("uae-food-bank", {
+                        "batch_id": batch_id,
+                        "previous_request_id": job.get("food_bank_request_record_id", ""),
+                        "event_id": job["event_id"],
+                        "items": dishes,
+                        "confirmed_weight_kg": confirmation.estimated_weight_kg,
+                        "variance_types": variance,
+                    }, "SIMULATED_REQUEST_UPDATED")
+                    _append_job_event(job, "REQUEST_UPDATED", "agent", True, {
+                        "actual_weight_kg": confirmation.estimated_weight_kg,
+                        "record_id": updated_record["id"],
+                        "reason": "The confirmed end-of-service quantity replaces the heads-up estimate.",
+                    })
+                    _record_tool_call(
+                        job,
+                        "update_request_quantity",
+                        {
+                            "request_id": job.get("food_bank_request_record_id", ""),
+                            "actual_weight_kg": confirmation.estimated_weight_kg,
+                        },
+                        "Update the non-binding or ad hoc request with the confirmed surplus.",
+                    )
+                    job["food_bank_request_record_id"] = updated_record["id"]
             _append_job_event(job, "WINDOW_COMPUTED", "agent", False, {"remaining_seconds": _remaining_seconds(job)})
             if job.get("event_id"):
                 event = get_food_event(job["event_id"])
@@ -982,6 +1245,7 @@ def post_job_command(batch_id: str, command: JobCommand) -> dict[str, Any]:
                     "untouched_confirmed": untouched and (
                         bool(job.get("approved_items")) if job.get("event_id") else True
                     ),
+                    "handling_history_confirmed": job.get("handling_history_confirmed") is True,
                     "remaining_safe_minutes": max(0, _remaining_seconds(job) // 60),
                     "pickup_eta_minutes": 20,
                     "safety_buffer_minutes": 15,
@@ -1017,7 +1281,7 @@ def post_job_command(batch_id: str, command: JobCommand) -> dict[str, Any]:
             if job["status"] != "OFFERING" or job["current_tier"] not in {1, 2}:
                 raise HTTPException(status_code=409, detail="No recipient offer is currently awaiting a response.")
             tier = str(job["current_tier"])
-            recipient = "Food Bank / charity" if tier == "1" else "Longer-life partner"
+            recipient = "Food Bank" if tier == "1" else "Registered charity"
             rung = job["rungs"][tier]
             if event_type == "OFFER_DECLINED":
                 reason = str(payload.get("reason", "")).strip()
@@ -1036,21 +1300,21 @@ def post_job_command(batch_id: str, command: JobCommand) -> dict[str, Any]:
                     job["current_tier"] = 2
                     job["rungs"]["2"]["state"] = "offered"
                     _append_job_event(job, event_type, command.actor, True, {"recipient": recipient, "reason": reason})
-                    _append_job_event(job, "REPLAN", "agent", False, {"recipient": "Longer-life partner"})
+                    _append_job_event(job, "REPLAN", "agent", False,                     {"recipient": "Registered charity"})
                     _record_tool_call(
                         job,
                         "send_offer",
                         {
-                            "recipient": "Longer-life partner",
+                            "recipient": "Registered charity",
                             "untouched_confirmed": job.get("untouched_confirmed") is True,
                             "confirmed_items": job.get("approved_items", job.get("dishes", [])),
                             "remaining_minutes": max(0, _remaining_seconds(job) // 60),
                         },
                         "Send the next eligible simulated offer after replanning.",
                     )
-                    _append_job_event(job, "OFFER_SENT", "agent", True, {"recipient": "Longer-life partner"})
+                    _append_job_event(job, "OFFER_SENT", "agent", True, {"recipient": "Registered charity"})
                 else:
-                    job["longer_life_decline_reason"] = reason
+                    job["charity_decline_reason"] = reason
                     _append_job_event(job, event_type, command.actor, True, {"recipient": recipient, "reason": reason})
                     _run_existing_rescue(job, "decline", "decline")
                     job["rungs"]["3"]["state"] = "active"
@@ -1106,13 +1370,50 @@ def post_job_command(batch_id: str, command: JobCommand) -> dict[str, Any]:
                     result = None
                 else:
                     result = None
+                accepted_items = payload.get("accepted_items", job.get("dishes", []))
+                if not isinstance(accepted_items, list) or not accepted_items or not all(
+                    isinstance(item, str) for item in accepted_items
+                ):
+                    raise HTTPException(status_code=422, detail="Accept at least one offered dish.")
+                offered_items = job.get("approved_items") or job.get("dishes", [])
+                if not set(accepted_items).issubset(set(offered_items)):
+                    raise HTTPException(status_code=422, detail="Only confirmed offered dishes can be accepted.")
+                declined_items = [item for item in job.get("dishes", []) if item not in accepted_items]
+                if declined_items:
+                    accepted_weight = payload.get("accepted_weight_kg")
+                    if not isinstance(accepted_weight, (int, float)) or accepted_weight <= 0 or accepted_weight > job["estimated_weight_kg"]:
+                        raise HTTPException(
+                            status_code=422,
+                            detail="Enter an estimated accepted weight when accepting only some dishes.",
+                        )
+                    job["estimated_weight_kg"] = float(accepted_weight)
+                    job["compost_only"] = sorted(set(job.get("compost_only", []) + declined_items))
+                    job["reconcile"]["per_dish_acceptance"].update({item: False for item in declined_items})
+                    _append_job_event(job, "INSPECTION_RESULT", command.actor, True, {
+                        "accepted_items": accepted_items,
+                        "compost_only": declined_items,
+                    })
+                    _append_job_event(job, "REQUEST_UPDATED", "agent", True, {
+                        "accepted_weight_kg": float(accepted_weight),
+                        "declined_items": declined_items,
+                    })
+                    _record_tool_call(
+                        job,
+                        "update_request_quantity",
+                        {"request_id": batch_id, "actual_weight_kg": float(accepted_weight)},
+                        "Update the simulated request to the recipient-accepted dishes and weight.",
+                    )
+                job["reconcile"]["per_dish_acceptance"].update({item: True for item in accepted_items})
+                job["approved_items"] = list(accepted_items)
+                job["dishes"] = list(accepted_items)
+                job["food_summary"] = ", ".join(accepted_items)
                 if tier == "1":
                     if result is None and job["status"] == "OFFERING":
                         job["food_bank_response"] = "accept"
                         result = _run_existing_rescue(job, "accept", "accept")
                 else:
                     if result is None and job["status"] == "OFFERING":
-                        job["longer_life_response"] = "accept"
+                        job["charity_response"] = "accept"
                         result = _run_existing_rescue(job, "decline", "accept")
                 if job["status"] == "OFFERING" and result is not None:
                     rung["state"] = "accepted"
@@ -1129,7 +1430,17 @@ def post_job_command(batch_id: str, command: JobCommand) -> dict[str, Any]:
                         {"batch_id": batch_id},
                         "Generate demo pickup and delivery credentials after recipient acceptance.",
                     )
-                    _append_job_event(job, event_type, command.actor, True, {"recipient": recipient})
+                    _append_job_event(job, event_type, command.actor, True, {
+                        "recipient": recipient,
+                        "accepted_items": accepted_items,
+                        "declined_items": declined_items,
+                        "accepted_weight_kg": job["estimated_weight_kg"],
+                    })
+                    _append_job_event(job, "COLLECTION_DISPATCHED", "agent", True, {
+                        "recipient": recipient,
+                        "selected_recipient": result["selected_recipient"],
+                        "estimated_weight_kg": job["estimated_weight_kg"],
+                    })
         elif event_type == "PICKUP_CONFIRMED":
             if job["status"] != "ACCEPTED":
                 raise HTTPException(status_code=409, detail="A recipient must accept before pickup.")
@@ -1172,7 +1483,7 @@ def post_job_command(batch_id: str, command: JobCommand) -> dict[str, Any]:
             _record_tool_call(
                 job,
                 "calculate_impact",
-                {"weight_kg": job["estimated_weight_kg"], "co2e_factor": 1.6},
+                {"weight_kg": job["estimated_weight_kg"], "co2e_factor": 2.5},
                 "Calculate labelled meal and CO2e estimates for the audit record.",
             )
             _append_job_event(job, "AUDIT_SEALED", "system", False, {"hash_chain_verified": True})
@@ -1189,7 +1500,7 @@ def post_job_command(batch_id: str, command: JobCommand) -> dict[str, Any]:
             _record_tool_call(
                 job,
                 "calculate_impact",
-                {"weight_kg": job["estimated_weight_kg"], "co2e_factor": 1.6},
+                {"weight_kg": job["estimated_weight_kg"], "co2e_factor": 2.5},
                 "Calculate labelled impact estimates for the compost outcome.",
             )
             _append_job_event(job, "AUDIT_SEALED", "system", False, {"hash_chain_verified": True})

@@ -85,7 +85,7 @@ function makeJob(overrides: Partial<DemoJob> = {}): DemoJob {
     },
     scenario: 'happy_path',
     food_bank_response: 'accept',
-    longer_life_response: 'accept',
+    charity_response: 'accept',
     selected_recipient: '',
     pickup_temperature_c: null,
     cancelled: false,
@@ -100,7 +100,7 @@ function makeJob(overrides: Partial<DemoJob> = {}): DemoJob {
       estimated_meals: 60,
       meal_estimate_assumption_kg: 0.4,
       estimated_co2e_kg: 38.4,
-      co2e_estimate_factor_kg_per_kg: 1.6,
+      co2e_estimate_factor_kg_per_kg: 2.5,
       estimate_notice: 'Estimate only',
       intake: {},
       hash_chain_verified: true,
@@ -173,7 +173,7 @@ describe('ConsolePage three-state presentation', () => {
     render(<ConsolePage />)
 
     expect(await screen.findByRole('heading', { name: 'Food left over?' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Add 1–3 leftover photos' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Some left — add photos' })).toBeTruthy()
     expect(screen.getByText('Menu loaded · Evening banquet')).toBeTruthy()
     expect(screen.queryByText('60:00')).toBeNull()
   })
@@ -293,8 +293,16 @@ describe('ConsolePage three-state presentation', () => {
     expect(screen.getByRole('button', { name: 'Start another' })).toBeTruthy()
   })
 
+  it('shows the no-surplus outcome as a successful closed record', () => {
+    setJob(makeJob({ status: 'SEALED', outcome: 'no_surplus' }))
+    render(<ConsolePage />)
+
+    expect(screen.getByRole('heading', { name: /No surplus remained/ })).toBeTruthy()
+    expect(screen.getByRole('link', { name: 'Download record' })).toBeTruthy()
+  })
+
   it('opens the driver portal without a static code and requires per-job handover codes', async () => {
-    const job = makeJob({ status: 'ACCEPTED', selected_recipient: 'uae-food-bank' })
+    const job = makeJob({ status: 'ACCEPTED', current_tier: 1, selected_recipient: 'uae-food-bank' })
     setJob(job)
     render(<DriverPortalPage />)
 
@@ -306,7 +314,7 @@ describe('ConsolePage three-state presentation', () => {
   })
 
   it('shows one-time pickup and delivery codes only in the recipient handover portal', async () => {
-    const job = makeJob({ status: 'ACCEPTED', selected_recipient: 'uae-food-bank' })
+    const job = makeJob({ status: 'ACCEPTED', current_tier: 1, selected_recipient: 'uae-food-bank' })
     setJob(job)
     render(<RecipientPortalPage />)
 
@@ -364,6 +372,27 @@ describe('ConsolePage three-state presentation', () => {
     }))
   })
 
+  it('offers the three end-of-service choices and records zero surplus without starting a rescue', async () => {
+    const command = vi.fn().mockResolvedValue(makeJob({ status: 'SEALED', outcome: 'no_surplus' }))
+    vi.mocked(useJobSync).mockReturnValue({
+      job: makeJob({ event_id: demoEvent.id }),
+      loading: false,
+      error: '',
+      reconnecting: false,
+      pending: false,
+      command,
+      refresh: vi.fn().mockResolvedValue(undefined),
+    })
+    render(<ConsolePage />)
+    await screen.findByRole('heading', { name: 'Food left over?' })
+
+    expect(screen.getByRole('button', { name: 'Nothing left' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Some left — add photos' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Not sure — review photos' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Nothing left' }))
+    expect(command).toHaveBeenCalledWith('END_OF_SERVICE_CONFIRMED', 'chef', { outcome: 'nothing_left' })
+  })
+
   it('starts the server countdown only after the intake confirmation command', async () => {
     const job = makeJob()
     setJob(job)
@@ -372,7 +401,7 @@ describe('ConsolePage three-state presentation', () => {
 
     expect(screen.queryByText('60:00')).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: 'Looks right' }))
-    fireEvent.click(screen.getByRole('button', { name: '100% Unserved Back-of-House' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm and find a home' }))
 
     expect(vi.mocked(useJobSync).mock.results[0]?.value.command).toHaveBeenCalledWith(
       'CHEF_CONFIRMED',
@@ -390,7 +419,7 @@ describe('ConsolePage three-state presentation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Looks right' }))
 
     expect(screen.getByText('Only food kept in the back-of-house and never served can go to people.')).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: 'Not sure / some served — compost only' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Not sure — compost only' }))
     expect(vi.mocked(useJobSync).mock.results[0]?.value.command).toHaveBeenCalledWith(
       'CHEF_CONFIRMED',
       'chef',

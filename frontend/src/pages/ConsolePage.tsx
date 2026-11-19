@@ -14,8 +14,8 @@ import type { DemoJob, EventAnalysis, EventMenuItem, FoodEvent, JobEvent } from 
 import './JobConsole.css'
 
 const scenarioLabels = {
-  happy_path: 'Everything goes smoothly',
-  decline_then_recover: 'A kitchen says no',
+  bigger_expected: 'Bigger than expected',
+  nothing_left: 'Nothing left',
   nobody_accepts: 'Nobody can take it',
 } as const
 
@@ -42,6 +42,7 @@ function getConsoleState(job: DemoJob): ConsoleState {
 }
 
 function getOutcome(job: DemoJob) {
+  if (job.outcome === 'no_surplus') return 'no_surplus'
   if (job.events.some((event) => event.type === 'COMPOST_CONFIRMED')) return 'compost'
   if (job.events.some((event) => event.type === 'DELIVERY_CONFIRMED')) return 'delivered'
   return 'human'
@@ -75,9 +76,9 @@ function isDuplicateEvent(event: JobEvent, index: number, events: JobEvent[]) {
 
 function PortalLinks({ showQr }: { showQr: boolean }) {
   const links = [
-    ['Recipient', '/portal/recipient'],
-    ['Driver', '/portal/driver'],
-    ['Composter', '/portal/composter'],
+    ['Food Bank', '/portal/food-bank'],
+    ['Charity', '/portal/charity'],
+    ['Compost', '/portal/compost'],
   ] as const
   return <div className="simple-portal-links">{links.map(([label, path]) => <div className="simple-portal-link" key={path}>
     {showQr && <QRCodeSVG aria-label={`${label} portal QR code`} value={`${window.location.origin}${path}`} size={64} />}
@@ -114,7 +115,7 @@ function IntakeStepper({ active }: { active: 'Event' | 'Photos' | 'Check' | 'Pla
 }
 
 function StartView({ job }: { job: DemoJob }) {
-  const { command, pending } = useJobSync()
+  const { command, pending, refresh } = useJobSync()
   const photoInput = useRef<HTMLInputElement>(null)
   const menuInput = useRef<HTMLInputElement>(null)
   const [events, setEvents] = useState<FoodEvent[]>([])
@@ -141,6 +142,8 @@ function StartView({ job }: { job: DemoJob }) {
   const [menuError, setMenuError] = useState('')
   const [busy, setBusy] = useState(false)
   const [formError, setFormError] = useState('')
+  const [headsUpSizeClass, setHeadsUpSizeClass] = useState<'none_likely' | 'small' | 'medium' | 'large'>('small')
+  const [pendingEndOutcome, setPendingEndOutcome] = useState<'some_left' | 'not_sure' | null>(null)
 
   useEffect(() => {
     let active = true
@@ -220,7 +223,19 @@ function StartView({ job }: { job: DemoJob }) {
     const input = event.currentTarget
     const files = Array.from(input.files ?? [])
     input.value = ''
-    if (files.length) await analyzePhotos(files)
+    if (files.length) {
+      if (pendingEndOutcome && job.event_id) {
+        try {
+          await command('END_OF_SERVICE_CONFIRMED', 'chef', { outcome: pendingEndOutcome })
+        } catch (cause) {
+          setFormError(cause instanceof Error ? cause.message : 'Could not record the end-of-service outcome.')
+          setPendingEndOutcome(null)
+          return
+        }
+      }
+      setPendingEndOutcome(null)
+      await analyzePhotos(files)
+    }
   }
 
   const startVoiceNote = (update: (value: string) => void = (value) => setVoiceNote((current) => `${current} ${value}`.trim())) => {
@@ -390,14 +405,43 @@ function StartView({ job }: { job: DemoJob }) {
       return
     }
     try {
+      if (job.event_id && job.end_of_service_outcome !== 'some_left') {
+        await command('END_OF_SERVICE_CONFIRMED', 'chef', { outcome: 'some_left' })
+      }
       await command('CHEF_CONFIRMED', 'chef', {
         dishes: selected,
         photo_name: photos.map((photo) => photo.name).join(', ') || 'leftover-photo',
         untouched_confirmed: true,
+        handling_history_confirmed: true,
         estimated_weight_kg: job.estimated_weight_kg,
       })
     } catch (cause) {
       setFormError(cause instanceof Error ? cause.message : 'The rescue could not be started.')
+    }
+  }
+
+  const confirmNothingLeft = async () => {
+    if (pending) return
+    try {
+      await command('END_OF_SERVICE_CONFIRMED', 'chef', { outcome: 'nothing_left' })
+    } catch (cause) {
+      setFormError(cause instanceof Error ? cause.message : 'Could not record the end-of-service outcome.')
+    }
+  }
+
+  const sendHeadsUp = async (event: FoodEvent) => {
+    setBusy(true)
+    setFormError('')
+    try {
+      if (job.event_id !== event.id) {
+        await selectFoodEvent(event.id)
+        await refresh()
+      }
+      await command('HEADS_UP_SENT', 'organiser', { size_class: headsUpSizeClass })
+    } catch (cause) {
+      setFormError(cause instanceof Error ? cause.message : 'Could not send the simulated heads-up.')
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -416,6 +460,21 @@ function StartView({ job }: { job: DemoJob }) {
       <ul className="manager-menu-list">{managerSelectedEvent.menu_items.map((item) => <li key={item.id}>
         <strong>{item.name}</strong><span>{item.allergens.length ? `Allergens: ${item.allergens.join(', ')}` : 'No allergens listed'} · Halal: {item.halal}</span>
       </li>)}</ul>
+      <label className="heads-up-size">Heads-up size class <span className="assumed-badge">Assumed</span>
+        <select value={headsUpSizeClass} onChange={(event) => setHeadsUpSizeClass(event.target.value as typeof headsUpSizeClass)}>
+          <option value="none_likely">None likely</option>
+          <option value="small">Small</option>
+          <option value="medium">Medium</option>
+          <option value="large">Large</option>
+        </select>
+      </label>
+      <p className="simple-hint">This is an estimate, not a promise or a confirmed donation.</p>
+      <button className="simple-secondary" disabled={busy || job.heads_up_sent || job.status !== 'DRAFT'} onClick={() => void sendHeadsUp(managerSelectedEvent)} type="button">
+        {job.heads_up_sent && job.event_id === managerSelectedEvent.id ? 'Heads-up sent' : 'Send Food Bank heads-up'}
+      </button>
+      <button className="simple-secondary" disabled={pending || job.event_id !== managerSelectedEvent.id || job.status !== 'DRAFT'} onClick={() => void command('REMINDER_SENT', 'organiser')} type="button">
+        Send end-of-service reminder · Simulated
+      </button>
       <button className="simple-primary" disabled={busy} onClick={() => void chooseEvent(managerSelectedEvent)} type="button">
         {busy ? 'Opening chef intake…' : 'Open chef intake'}
       </button>
@@ -472,7 +531,18 @@ function StartView({ job }: { job: DemoJob }) {
         <strong>{event.name}</strong><span>{event.venue}</span>
       </button>)}</div>}
       <input ref={photoInput} accept="image/*" capture="environment" className="visually-hidden" multiple onChange={(event) => void choosePhoto(event)} type="file" />
-      {selectedEvent && <button className="simple-primary photo-button" disabled={busy} onClick={() => photoInput.current?.click()} type="button">{busy ? 'Checking the photos…' : 'Add 1–3 leftover photos'}</button>}
+      {selectedEvent && <div className="end-of-service-choices" aria-label="End of service outcome">
+        <p>End of service: what is left?</p>
+        <button className="simple-secondary" disabled={pending || job.end_of_service_outcome === 'nothing_left'} onClick={() => void confirmNothingLeft()} type="button">Nothing left</button>
+        <button className="simple-primary photo-button" disabled={busy} onClick={() => {
+          setPendingEndOutcome('some_left')
+          photoInput.current?.click()
+        }} type="button">{busy ? 'Checking the photos…' : 'Some left — add photos'}</button>
+        <button className="simple-secondary" disabled={busy} onClick={() => {
+          setPendingEndOutcome('not_sure')
+          photoInput.current?.click()
+        }} type="button">Not sure — review photos</button>
+      </div>}
       {selectedEvent && <>
         {photos.length > 0 && <p className="simple-hint">{photos.length} leftover photo{photos.length === 1 ? '' : 's'} selected</p>}
         <label className="leftover-note" htmlFor="voice-note">Short description (optional)<textarea id="voice-note" placeholder="For example: three full biryani trays, kept hot in the kitchen." rows={2} value={voiceNote} onChange={(event) => setVoiceNote(event.target.value)} /></label>
@@ -497,13 +567,24 @@ function StartView({ job }: { job: DemoJob }) {
         <button className="simple-secondary" onClick={() => { setAnalysis(null); setStep('photos'); setFormError('') }} type="button">Retake photo</button>
       </> : <>
         <p className="safety-confirm-copy">Only food kept in the back-of-house and never served can go to people.</p>
-        <button className="simple-primary" disabled={pending || selected.length === 0} onClick={() => void submit()} type="button">{pending ? 'Finding a safe home…' : '100% Unserved Back-of-House'}</button>
-        <button className="simple-secondary" disabled={pending} onClick={() => void command('CHEF_CONFIRMED', 'chef', {
-          dishes: selected,
-          photo_name: photos.map((photo) => photo.name).join(', ') || 'leftover-photo',
-          untouched_confirmed: false,
-          estimated_weight_kg: job.estimated_weight_kg,
-        })} type="button">Not sure / some served — compost only</button>
+        <p className="safety-confirm-copy">Confirm 100% untouched, back-of-house food with known handling history. Anything uncertain goes to compost.</p>
+        <button className="simple-primary" disabled={pending || selected.length === 0} onClick={() => void submit()} type="button">{pending ? 'Finding a safe home…' : 'Confirm and find a home'}</button>
+        <button className="simple-secondary" disabled={pending} onClick={() => void (async () => {
+          try {
+            if (job.event_id && job.end_of_service_outcome !== 'not_sure') {
+              await command('END_OF_SERVICE_CONFIRMED', 'chef', { outcome: 'not_sure' })
+            }
+            await command('CHEF_CONFIRMED', 'chef', {
+              dishes: selected,
+              photo_name: photos.map((photo) => photo.name).join(', ') || 'leftover-photo',
+              untouched_confirmed: false,
+              handling_history_confirmed: false,
+              estimated_weight_kg: job.estimated_weight_kg,
+            })
+          } catch (cause) {
+            setFormError(cause instanceof Error ? cause.message : 'Could not route uncertain food safely.')
+          }
+        })()} type="button">Not sure — compost only</button>
       </>}
       {formError && <p className="simple-error" role="alert">{formError}</p>}
     </section> : null;
@@ -759,6 +840,9 @@ function DoneView({ job, onStartAnother }: { job: DemoJob; onStartAnother: () =>
       </> : outcome === 'compost' ? <>
         <p className="simple-eyebrow">DONE</p>
         <h1>Composted. No safe home was found in time. Record saved.</h1>
+      </> : outcome === 'no_surplus' ? <>
+        <p className="simple-eyebrow">DONE</p>
+        <h1>No surplus remained. The standby slot was released and the hotel record was saved.</h1>
       </> : <>
         <p className="simple-eyebrow">DONE</p>
         <h1>A person stepped in to handle this rescue.</h1>

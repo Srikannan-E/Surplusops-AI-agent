@@ -1,6 +1,6 @@
 # SurplusOps simulation API
 
-This is a local/demo backend. Partner portals and workflow actions are simulations; they do not call or represent integrations with UAE Food Bank, Deliveroo/Collecteroo, Reloop, public cold-storage operators, ne’ma, DET, or Dubai Municipality.
+This is a local/demo backend. Partner portals and workflow actions are simulations; they do not call or represent integrations with UAE Food Bank, registered charities, Deliveroo/Collecteroo, Reloop, ne’ma, DET, or Dubai Municipality.
 
 ## Run locally
 
@@ -27,6 +27,6 @@ Portal requests and simulation events are stored in `backend/data/surplusops.sql
 - `collecteroo`: first-mile logistics dispatch request
 - `uae-food-bank`: food donation intake/offer
 
-The demo graph checks explicit safety inputs first. It offers eligible food to the simulated UAE Food Bank, then public cold storage on decline, then sends it through the simulated logistics adapter. If food is ineligible or all recipients decline, it creates a simulated Reloop fallback request.
+The demo graph checks explicit safety inputs first. It offers eligible food to the simulated UAE Food Bank, then a registered charity on decline, then sends it through the simulated logistics adapter. If food is ineligible or all recipients decline, it creates a simulated Reloop fallback request.
 
 Use synthetic data only. This backend is not food-safety advice or authorization to donate food.

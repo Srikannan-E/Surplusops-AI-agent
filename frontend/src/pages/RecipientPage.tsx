@@ -11,8 +11,8 @@ export function RecipientPage() {
     () => current.rescue_result ? current.food_bank_response : null,
   )
   const [reason, setReason] = useState(current.food_bank_decline_reason)
-  const [backupResponse, setBackupResponse] = useState<'accept' | 'decline'>(current.cold_storage_response)
-  const [backupReason, setBackupReason] = useState(current.cold_storage_decline_reason)
+  const [backupResponse, setBackupResponse] = useState<'accept' | 'decline'>(current.charity_response)
+  const [backupReason, setBackupReason] = useState(current.charity_decline_reason)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [completed, setCompleted] = useState(() => Boolean(current.rescue_result))
@@ -23,8 +23,8 @@ export function RecipientPage() {
       ...readDemoSession(),
       food_bank_response: response,
       food_bank_decline_reason: response === 'decline' ? reason.trim() : '',
-      cold_storage_response: backupResponse,
-      cold_storage_decline_reason: backupResponse === 'decline'
+      charity_response: backupResponse,
+      charity_decline_reason: backupResponse === 'decline'
         ? backupReason.trim() || 'No recipient capacity was available.'
         : '',
     }
@@ -46,7 +46,7 @@ export function RecipientPage() {
       <section className="panel empty-workflow">
         <div className="eyebrow">02 / Recipient portal</div>
         <h1>No offer to review yet</h1>
-        <p className="subtitle">Complete the chef intake first. This screen acts as the simulated recipient and does not contact a charity, bank, or fridge operator.</p>
+        <p className="subtitle">Complete the chef intake first. This screen acts as a simulated registered charity and does not contact any real recipient.</p>
         <Link className="button" to="/chef">Go to chef intake</Link>
       </section>
     )

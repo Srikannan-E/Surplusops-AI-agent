@@ -5,6 +5,9 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 RecipientResponse = Literal["accept", "decline"]
+DonationIntentStatus = Literal["standby", "confirmed", "cancelled_no_surplus"]
+DonationSizeClass = Literal["none_likely", "small", "medium", "large"]
+EndOfServiceOutcome = Literal["nothing_left", "some_left", "not_sure"]
 
 
 class StrictModel(BaseModel):
@@ -36,6 +39,27 @@ class FoodEvent(StrictModel):
     contact: str = Field(min_length=2, max_length=200)
     status: Literal["planned", "active", "completed"] = "planned"
     menu_items: list[EventMenuItem] = Field(default_factory=list, max_length=300)
+
+
+class DonationIntent(StrictModel):
+    status: DonationIntentStatus = "standby"
+    size_class: DonationSizeClass | None = None
+    is_estimate: bool = True
+
+
+class Reconcile(StrictModel):
+    variance_types: list[Literal[
+        "more_than_expected",
+        "some_unsafe",
+        "event_ran_late",
+        "less_than_expected",
+        "unscheduled",
+        "no_surplus",
+    ]] = Field(default_factory=list)
+    actual_weight_kg: float | None = Field(default=None, ge=0, le=5000)
+    unsafe_items: list[str] = Field(default_factory=list, max_length=100)
+    delay_minutes: int = Field(default=0, ge=0, le=1440)
+    per_dish_acceptance: dict[str, bool] = Field(default_factory=dict)
 
 
 class MenuExtractRequest(StrictModel):
@@ -86,13 +110,12 @@ class FoodBankRequest(StrictModel):
     simulated_response: RecipientResponse = "accept"
 
 
-class ColdStorageRequest(StrictModel):
+class CharityRequest(StrictModel):
     batch_id: str = Field(min_length=2, max_length=80)
     item_summary: str = Field(min_length=2, max_length=500)
     estimated_weight_kg: float = Field(gt=0, le=5000)
-    storage_type: Literal["chilled", "frozen", "ambient"]
-    facility_name: str = Field(min_length=2, max_length=120)
-    facility_location: str = Field(min_length=2, max_length=200)
+    charity_name: str = Field(min_length=2, max_length=120)
+    pickup_location: str = Field(min_length=2, max_length=200)
     required_until: str = Field(min_length=8, max_length=32)
     simulated_response: RecipientResponse = "accept"
 
@@ -104,6 +127,7 @@ class RescueRunRequest(StrictModel):
     food_summary: str = Field(min_length=2, max_length=500)
     estimated_weight_kg: float = Field(gt=0, le=5000)
     untouched_confirmed: bool
+    handling_history_confirmed: bool = False
     allergens_from_menu: list[str] = Field(default_factory=list, max_length=30)
     halal_status: Literal["venue_declared", "verified_by_venue", "unknown"] = "unknown"
     remaining_safe_minutes: int = Field(ge=0, le=1440)
@@ -111,11 +135,11 @@ class RescueRunRequest(StrictModel):
     safety_buffer_minutes: int = Field(ge=0, le=240, default=20)
     food_bank_response: RecipientResponse = "decline"
     food_bank_decline_reason: str = Field(default="", max_length=300)
-    cold_storage_response: RecipientResponse = "decline"
-    cold_storage_decline_reason: str = Field(default="", max_length=300)
+    charity_response: RecipientResponse = "decline"
+    charity_decline_reason: str = Field(default="", max_length=300)
     pickup_location: str = Field(min_length=2, max_length=200)
     food_bank_location: str = Field(default="UAE Food Bank hub (simulated)", max_length=200)
-    cold_storage_location: str = Field(default="Community Cold Store 01 (simulated)", max_length=200)
+    charity_location: str = Field(default="Registered charity hub (simulated)", max_length=200)
     collection_deadline: str = Field(min_length=8, max_length=32)
 
 
@@ -152,6 +176,15 @@ class NemaStyleRecord(StrictModel):
 
 class JobCommand(StrictModel):
     type: Literal[
+        "HEADS_UP_SENT",
+        "HEADS_UP_CANCELLED",
+        "SLOT_ACKNOWLEDGED",
+        "REMINDER_SENT",
+        "END_OF_SERVICE_CONFIRMED",
+        "SURPLUS_CONFIRMED",
+        "VARIANCE_CLASSIFIED",
+        "REQUEST_UPDATED",
+        "ADHOC_REQUESTED",
         "CHEF_CONFIRMED",
         "OFFER_ACCEPTED",
         "OFFER_DECLINED",
